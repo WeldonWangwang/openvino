@@ -370,8 +370,6 @@ IExecutableNetworkInternal::Ptr MultiDeviceInferencePlugin::LoadNetworkImpl(cons
     // Remove the performance hint as this is set by plugin logic, not from user
     if (!isHintSet)
         fullConfig.erase(ov::hint::performance_mode.name());
-    if (!loadConfig.is_set_by_user(ov::cache_dir))
-        fullConfig.erase(ov::cache_dir.name());
     if (!loadConfig.is_set_by_user(ov::hint::execution_mode))
         fullConfig.erase(ov::hint::execution_mode.name());
     // collect the settings that are applicable to the devices we are loading the network to
@@ -463,7 +461,6 @@ IExecutableNetworkInternal::Ptr MultiDeviceInferencePlugin::LoadNetworkImpl(cons
                 insertPropToConfig(ov::hint::allow_auto_batching.name(), iter->deviceName, configs);
             if (loadConfig.is_set_by_user(ov::auto_batch_timeout))
                 insertPropToConfig(ov::auto_batch_timeout.name(), iter->deviceName, configs);
-            insertPropToConfig(ov::cache_dir.name(), iter->deviceName, configs);
             LOG_INFO_TAG("device:%s, priority:%ld", iter->deviceName.c_str(), iter->devicePriority);
         }
         autoSContext->_modelPath = clonedModelPath;
@@ -522,7 +519,6 @@ IExecutableNetworkInternal::Ptr MultiDeviceInferencePlugin::LoadNetworkImpl(cons
         }
         if (loadConfig.is_set_by_user(ov::auto_batch_timeout))
             insertPropToConfig(ov::auto_batch_timeout.name(), p.deviceName, p.config);
-        insertPropToConfig(ov::cache_dir.name(), p.deviceName, p.config);
         const auto& deviceName = p.deviceName;
         const auto& deviceConfig = p.config;
         SoExecutableNetworkInternal exec_net;
@@ -673,8 +669,6 @@ QueryNetworkResult MultiDeviceInferencePlugin::QueryNetwork(const CNNNetwork&   
     auto fullproperty = queryconfig.get_full_properties();
     // this can be updated when plugin switch to 2.0 API
     std::map<std::string, std::string> fullConfig =  ConvertToStringMap(fullproperty);
-    if (!queryconfig.is_set_by_user(ov::cache_dir))
-        fullConfig.erase(ov::cache_dir.name());
     auto priorities = fullConfig.find(ov::device::priorities.name());
     if (!priorities->second.empty()) {
         auto metaDevices = ParseMetaDevices(priorities->second, fullConfig);
