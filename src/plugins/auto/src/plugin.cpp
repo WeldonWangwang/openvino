@@ -529,9 +529,11 @@ std::list<DeviceInformation> MultiDeviceInferencePlugin::GetValidDevice(
         IE_THROW(NotFound) << "No available device to select in " << GetName() << " plugin";
     }
     auto isIntelDevice = [](std::string architectureInfo) {
-        auto start = architectureInfo.find("GPU: vendor=");
-        auto end = architectureInfo.find(" arch=");
-        auto vendorID = architectureInfo.substr(start, end - start);
+        std::string startString = "GPU: vendor=";
+        std::string endString = " arch=";
+        auto start = architectureInfo.find(startString);
+        auto end = architectureInfo.find(endString);
+        auto vendorID = architectureInfo.substr(start + startString.length(), end - start - startString.length());
         if (vendorID == "0x8086") {
             return true;
         } else {
@@ -559,13 +561,26 @@ std::list<DeviceInformation> MultiDeviceInferencePlugin::GetValidDevice(
             continue;
         }
         if (item.deviceName.find("GPU") == 0) {
-            auto deviceType = GetCore()->GetMetric(item.deviceName, METRIC_KEY(DEVICE_TYPE)).as<ov::device::Type>();
+            std::cout << "device: " << item.deviceName << std::endl;
             auto deviceArchitecture = GetCore()->GetMetric(item.deviceName, METRIC_KEY(DEVICE_ARCHITECTURE)).as<std::string>();
+            std::cout << "deviceArchitecture : " << deviceArchitecture << std::endl;
             if (isIntelDevice(deviceArchitecture)) {
-                if (deviceType == ov::device::Type::INTEGRATED) {
-                    iGPU.push_back(item);
-                } else if (deviceType == ov::device::Type::DISCRETE) {
-                    dGPU.push_back(item);
+                if (IsNewAPI()) {
+                    auto deviceType = GetCore()->GetMetric(item.deviceName, METRIC_KEY(DEVICE_TYPE)).as<ov::device::Type>();
+                    std::cout << "deviceType : " << deviceType << std::endl;
+                    if (deviceType == ov::device::Type::INTEGRATED) {
+                        iGPU.push_back(item);
+                    } else if (deviceType == ov::device::Type::DISCRETE) {
+                        dGPU.push_back(item);
+                    }
+                } else {
+                    auto deviceType = GetCore()->GetMetric(item.deviceName, METRIC_KEY(DEVICE_TYPE)).as<Metrics::DeviceType>();
+                    std::cout << "deviceType : " << deviceType << std::endl;
+                    if (deviceType == Metrics::DeviceType::integrated) {
+                        iGPU.push_back(item);
+                    } else if (deviceType == Metrics::DeviceType::discrete) {
+                        dGPU.push_back(item);
+                    }
                 }
             }
             continue;

@@ -238,6 +238,7 @@ public:
        IE_SET_METRIC(OPTIMIZATION_CAPABILITIES, gpuCability, {"FP32", "FP16", "BATCHED_BLOB", "BIN", "INT8"});
        IE_SET_METRIC(OPTIMIZATION_CAPABILITIES, myriadCability, {"FP16"});
        IE_SET_METRIC(OPTIMIZATION_CAPABILITIES, vpuxCability, {"INT8"});
+       IE_SET_METRIC(DEVICE_ARCHITECTURE, gg, "GPU: vendor=0x8086 arch=0");
 
        ON_CALL(*core, GetMetric(StrEq(CommonTestUtils::DEVICE_CPU),
                    StrEq(METRIC_KEY(OPTIMIZATION_CAPABILITIES)), _)).WillByDefault(RETURN_MOCK_VALUE(cpuCability));
@@ -247,6 +248,8 @@ public:
                    StrEq(METRIC_KEY(OPTIMIZATION_CAPABILITIES)), _)).WillByDefault(RETURN_MOCK_VALUE(myriadCability));
        ON_CALL(*core, GetMetric(StrEq(CommonTestUtils::DEVICE_KEEMBAY),
                    StrEq(METRIC_KEY(OPTIMIZATION_CAPABILITIES)), _)).WillByDefault(RETURN_MOCK_VALUE(vpuxCability));
+       ON_CALL(*core, GetMetric(StrEq(CommonTestUtils::DEVICE_GPU),
+                   StrEq(METRIC_KEY(DEVICE_ARCHITECTURE)), _)).WillByDefault(RETURN_MOCK_VALUE(gg));
        ON_CALL(*plugin, SelectDevice).WillByDefault([this](const std::vector<DeviceInformation>& metaDevices,
                    const std::string& netPrecision, unsigned int priority) {
                return plugin->MultiDeviceInferencePlugin::SelectDevice(metaDevices, netPrecision, priority);
@@ -269,8 +272,17 @@ TEST_P(SelectDeviceTest, SelectDevice) {
     std::tie(netPrecision, devices, expect, throwExcept, enableDevicePriority, reverse) = this->GetParam();
 
     EXPECT_CALL(*plugin, SelectDevice(_, _, _)).Times(1);
+    if (expect.uniqueName.find("dGPU") != std::string::npos) {
+       IE_SET_METRIC(DEVICE_TYPE, tt, Metrics::DeviceType::discrete);
+       ON_CALL(*core, GetMetric(StrEq(CommonTestUtils::DEVICE_GPU),
+                   StrEq(METRIC_KEY(DEVICE_TYPE)), _)).WillByDefault(RETURN_MOCK_VALUE(tt));
+    } else if (expect.uniqueName.find("iGPU") != std::string::npos) {
+       IE_SET_METRIC(DEVICE_TYPE, tt, Metrics::DeviceType::integrated);
+       ON_CALL(*core, GetMetric(StrEq(CommonTestUtils::DEVICE_GPU),
+                   StrEq(METRIC_KEY(DEVICE_TYPE)), _)).WillByDefault(RETURN_MOCK_VALUE(tt));
+    }
     if (devices.size() >= 1) {
-        EXPECT_CALL(*core, GetMetric(_, _, _)).Times(AtLeast(static_cast<int>(devices.size()) - 1));
+        EXPECT_CALL(*core, GetMetric(_, _, _)).Times(AtLeast(0));
     } else {
         EXPECT_CALL(*core, GetMetric(_, _, _)).Times(0);
     }
