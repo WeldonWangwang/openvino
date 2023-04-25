@@ -193,6 +193,7 @@ public:
     }
 
     bool isSupportedDevice(const std::string& deviceName) const {
+        std::cout << "deviceName: " << deviceName << std::endl;
         if (deviceName.empty())
             return false;
         auto realDevName = deviceName[0] != '-' ? deviceName : deviceName.substr(1);
@@ -200,10 +201,12 @@ public:
             return false;
         }
         realDevName = ov::DeviceIDParser(realDevName).get_device_name();
+        std::cout << "realDevName0: " << realDevName << std::endl;
         std::string::size_type realEndPos = 0;
         if ((realEndPos = realDevName.find('(')) != std::string::npos) {
             realDevName = realDevName.substr(0, realEndPos);
         }
+        std::cout << "realDevName1: " << realDevName << std::endl;
         if (_deviceBlocklist.end() != std::find(_deviceBlocklist.begin(), _deviceBlocklist.end(), realDevName)) {
             return false;
         }

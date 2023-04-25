@@ -549,6 +549,7 @@ std::list<DeviceInformation> MultiDeviceInferencePlugin::GetValidDevice(
             continue;
         }
         if (item.deviceName.find("GPU") == 0) {
+            std::cout << "item.deviceName: " << item.deviceName << std::endl;
             ov::Any deviceType;
             if (IsNewAPI()) {
                 deviceType = GetCore()->GetMetric(item.deviceName, METRIC_KEY(DEVICE_TYPE)).as<ov::device::Type>();
