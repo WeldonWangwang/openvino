@@ -232,7 +232,7 @@ void TransformationsPipeline::apply(std::shared_ptr<ov::Model> func) {
 
         manager.register_pass<ov::pass::MarkDequantizationSubgraph>(ov::element::TypeVector{ov::element::u8}, true);
 
-        const bool keep_precision_sensitive_in_fp32_1 = true;
+        const bool keep_precision_sensitive_in_fp32_1 = false;
         const bool convert_input_output_precision = false;
         manager.register_pass<ov::pass::ConvertPrecision>(fp_convert_precision_map,
                                                           empty_fuse_map,
@@ -465,7 +465,9 @@ void TransformationsPipeline::apply(std::shared_ptr<ov::Model> func) {
 
         pass_config->enable<ov::pass::SoftmaxDecomposition>();
         pass_config->set_callback<ov::pass::SoftmaxDecomposition>(
-            [](const_node_ptr &node) -> bool {
+            [&](const_node_ptr &node) -> bool {
+                OPENVINO_ASSERT(node->input_value(0).get_partial_shape().rank().is_static(),
+                    node->get_friendly_name() + " has dynamic rank!");
                 return node->input_value(0).get_partial_shape().rank().get_length() <= 5;
             });
 
