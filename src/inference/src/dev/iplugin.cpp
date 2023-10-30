@@ -255,7 +255,7 @@ std::unordered_set<std::string> ov::get_supported_nodes(
         const auto& name = op->get_friendly_name();
         if (ov::is_type<ov::op::util::ShapeOfBase>(op) && (supported.count(name) || removed_nodes.count(name))) {
             // Don't allow cut on ShapeOf
-            if (has_all_consumers_unsupported(supported, op) && has_all_consumers_unsupported(removed_nodes, op)) {
+            if (has_all_consumers_unsupported(supported, op) && has_all_consumers_unsupported(removed_nodes, op) && memory_size_in_bytes) {
                 remove_op_from_supported(op);
                 removed_nodes.erase(name);
             }
