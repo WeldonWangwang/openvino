@@ -49,12 +49,12 @@ static size_t get_cpu_ram_size() {
 }
 #else
 # include <sys/sysinfo.h>
-/*
+
 static size_t get_cpu_ram_size() {
     struct sysinfo s {};
     sysinfo(&s);
     return s.totalram;
-}*/
+}
 #endif
 
 namespace cldnn {
@@ -82,8 +82,16 @@ bool engine::use_unified_shared_memory() const {
 }
 
 uint64_t engine::get_max_memory_size() const {
-    static uint64_t max_device_mem = get_device_info().max_global_mem_size;
+    static uint64_t max_device_mem = get_host_memory_size();
+    const auto& dev_type = get_device_info().dev_type;
+    if (dev_type == device_type::discrete_gpu) {
+        max_device_mem += get_device_info().max_global_mem_size;
+    }
     return max_device_mem;
+}
+
+uint64_t engine::get_host_memory_size() const {
+    return static_cast<uint64_t>(get_cpu_ram_size());
 }
 
 bool engine::supports_allocation(allocation_type type) const {
