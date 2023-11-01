@@ -269,7 +269,8 @@ void SyncInferRequest::set_tensor(const ov::Output<const ov::Node>& port, const 
     OPENVINO_ASSERT(tensor != nullptr, "[GPU] Failed to set empty tensor to port: \'", name, "\'");
     OPENVINO_ASSERT(port.get_element_type() == tensor->get_element_type(),
                     "[GPU] Mismtach tensor and port type: ", port.get_element_type(), " vs ", tensor->get_element_type());
-    OPENVINO_ASSERT(shape.compatible(ov::PartialShape(tensor->get_shape())) || tensor->get_shape() == ov::Shape{0},
+    bool is_dynamic = port.get_partial_shape().is_dynamic();
+    OPENVINO_ASSERT(is_dynamic || shape.compatible(ov::PartialShape(tensor->get_shape())) || tensor->get_shape() == ov::Shape{0},
                     "[GPU] The tensor size is not equal to model, can't set input tensor with name: ",
                     name,
                     ", because model input (shape=",
@@ -458,6 +459,13 @@ void SyncInferRequest::wait() {
                         "[GPU] Output tensor set by user has smaller size (", output_tensor->get_byte_size(), ") ",
                         "than required (", output_memory->size(), ")");
 
+        GPU_DEBUG_TRACE_DETAIL << name << " model output: " << output_memory->buffer_ptr() << std::endl;
+        if (is_remote) {
+            GPU_DEBUG_TRACE_DETAIL << name << " handle output tensor (remote): " << remote_ptr->get_original_memory()->buffer_ptr() << std::endl;
+        } else {
+            GPU_DEBUG_TRACE_DETAIL << name << " handle output tensor (host): " << output_tensor->data() << std::endl;
+        }
+
         bool need_output_update = output_layout.bytes_count() == 0 || (output_memory && output_tensor->get_byte_size() != output_memory->size());
         if (need_output_update) {
             OV_ITT_SCOPED_TASK(itt::domains::intel_gpu_plugin, "SyncInferRequest::wait::update_output");
@@ -578,7 +586,6 @@ TensorWrapper SyncInferRequest::create_or_share_device_tensor(const TensorWrappe
     auto usm_host_tensor = std::dynamic_pointer_cast<USMHostTensor>(user_tensor);
     bool can_share = usm_host_tensor != nullptr && !is_convert_required(user_tensor->get_element_type(), element_type) &&
                      can_use_usm_host(m_graph->get_engine());
-
     if (can_share) {
         return { usm_host_tensor->get_impl(), user_tensor_wrapper.owner };
     }

@@ -110,7 +110,7 @@ std::shared_ptr<RemoteContextImpl> RemoteContextImpl::get_this_shared_ptr() {
 }
 
 ov::SoPtr<ov::ITensor> RemoteContextImpl::create_host_tensor(const ov::element::Type type, const ov::Shape& shape) {
-    if (m_engine->use_unified_shared_memory()) {
+    if (m_engine->use_unified_shared_memory() && 0) {
         return { std::make_shared<USMHostTensor>(get_this_shared_ptr(), type, shape), nullptr };
     } else {
         return { ov::make_tensor(type, shape), nullptr };
