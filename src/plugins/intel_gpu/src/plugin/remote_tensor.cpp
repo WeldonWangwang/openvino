@@ -80,7 +80,7 @@ void RemoteTensorImpl::update_strides() {
     m_strides.clear();
     if (!shape.empty()) {
         m_strides.resize(shape.size());
-        m_strides.back() = m_element_type.size();
+        m_strides.back() = shape.back() == 0 ? 0 : m_element_type.size();
         std::copy(shape.rbegin(), shape.rend() - 1, m_strides.rbegin() + 1);
         std::partial_sum(m_strides.rbegin(), m_strides.rend(), m_strides.rbegin(), std::multiplies<size_t>());
     }
@@ -125,6 +125,10 @@ void RemoteTensorImpl::allocate() {
 
     auto context = std::dynamic_pointer_cast<RemoteContextImpl>(m_context);
     auto enable_caching = supports_caching();
+
+    if (is_surface()) {
+        m_layout.format = cldnn::format::nv12;  // Other formats are not supported
+    }
 
     if (enable_caching) {
         m_memory_object = context->try_get_cached_memory(m_hash);
@@ -173,7 +177,6 @@ void RemoteTensorImpl::allocate() {
     }
 #ifdef _WIN32
     case TensorType::BT_SURF_SHARED: {
-        m_layout.format = cldnn::format::nv12; // Other formats are not supported
         m_memory_object = engine.share_surface(m_layout, m_mem, m_plane);
         break;
     }
@@ -183,13 +186,11 @@ void RemoteTensorImpl::allocate() {
     }
 #else
     case TensorType::BT_SURF_SHARED: {
-        m_layout.format = cldnn::format::nv12; // Other formats are not supported
         m_memory_object = engine.share_surface(m_layout, m_surf, m_plane);
         break;
     }
 #endif
     case TensorType::BT_IMG_SHARED: {
-        m_layout.format = cldnn::format::nv12; // Other formats are not supported
         m_memory_object = engine.share_image(m_layout, m_mem);
         break;
     }
@@ -208,7 +209,7 @@ const std::string& RemoteTensorImpl::get_device_name() const {
     return m_context->get_device_name();
 }
 
-bool RemoteTensorImpl::is_shared() const {
+bool RemoteTensorImpl::is_shared() const noexcept {
     return m_mem_type == TensorType::BT_BUF_SHARED ||
            m_mem_type == TensorType::BT_USM_SHARED ||
            m_mem_type == TensorType::BT_IMG_SHARED ||
@@ -235,8 +236,7 @@ void RemoteTensorImpl::update_hash() {
 
 bool RemoteTensorImpl::is_surface() const noexcept {
     return m_mem_type == TensorType::BT_SURF_SHARED ||
-           m_mem_type == TensorType::BT_IMG_SHARED ||
-           m_mem_type == TensorType::BT_DX_BUF_SHARED;
+           m_mem_type == TensorType::BT_IMG_SHARED;
 }
 
 cldnn::memory::ptr RemoteTensorImpl::get_memory() const {
