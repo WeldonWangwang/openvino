@@ -49,12 +49,12 @@ static size_t get_cpu_ram_size() {
 }
 #else
 # include <sys/sysinfo.h>
-/*
+
 static size_t get_cpu_ram_size() {
     struct sysinfo s {};
     sysinfo(&s);
     return s.totalram;
-}*/
+}
 #endif
 
 namespace cldnn {
