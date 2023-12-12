@@ -140,22 +140,43 @@ bool convert_node_output_precision(
     bool function_changed) {
     bool node_changed = false;
     // Handle case with Constants as they can have consumers from other ov::Model object
+    // if (node->get_friendly_name() == "__module.model.model.layers.31.mlp.down_proj/aten::linear/MatMul_6711") {
+    //     auto users_ = node->get_users();
+    //     for (auto &itt : users_) {
+    //         std::cout << itt->get_friendly_name() << " " << itt->get_element_type() << std::endl;
+    //     }
+    // }
     const auto constant = ov::as_type_ptr<opset10::Constant>(node);
     const auto it = const_to_internal_output.find(node.get());
     if (constant && it != const_to_internal_output.end()) {
         return fuse_type_to_constant(node, precisions, it->second);
     }
-
+    // if (node->get_friendly_name() == "__module.model.model.layers.31.mlp.down_proj/aten::linear/MatMul_6711") {
+    //     auto users_ = node->get_users();
+    //     for (auto &itt : users_) {
+    //         std::cout << itt->get_friendly_name() << " " << itt->get_element_type() << std::endl;
+    //     }
+    // }
     // Check that node type exists in map and we can fuse type into node
     const auto t2f_it = type_to_fuse.find(node->get_type_info());
     if (t2f_it != type_to_fuse.end()) {
         node_changed = t2f_it->second(node, precisions);
     }
-
+    // if (node->get_friendly_name() == "__module.model.model.layers.31.mlp.down_proj/aten::linear/MatMul_6711") {
+    //     auto users_ = node->get_users();
+    //     for (auto &itt : users_) {
+    //         std::cout << itt->get_friendly_name() << " " << itt->get_element_type() << std::endl;
+    //     }
+    // }
     if ((function_changed || node_changed) && !node_is_replaced(node)) {
         node->revalidate_and_infer_types();
     }
-
+    // if (node->get_friendly_name() == "__module.model.model.layers.31.mlp.down_proj/aten::linear/MatMul_6711") {
+    //     auto users_ = node->get_users();
+    //     for (auto &itt : users_) {
+    //         std::cout << itt->get_friendly_name() << " " << itt->get_element_type() << std::endl;
+    //     }
+    // }
     return node_changed;
 }
 
@@ -170,7 +191,11 @@ bool convert_node_input_precision(const std::shared_ptr<ov::Node>& node,
     return false;
 }
 
-bool convert_function_precision(const std::shared_ptr<Model>& f,
+bool print_flag = false;
+
+bool convert_function_precision(ov::pass::PassBase& pass,
+                                std::shared_ptr<ov::pass::PassConfig> pass_config,
+                                const std::shared_ptr<Model>& f,
                                 const type_to_fuse_map& type_to_fuse,
                                 const type_to_fuse_map& type_to_extend,
                                 const precisions_map& precisions,
@@ -182,6 +207,20 @@ bool convert_function_precision(const std::shared_ptr<Model>& f,
                                 bool convert_input_output_precision) {
     bool is_output_precision_changed = false;
 
+    if (is_subgraph && skip_precision_sensitive) {
+        pass::Manager manager(pass_config);
+        // Mark subgraphs with disable_fp16_compression to keep them in FP32
+        // manager.register_pass<pass::MarkSugraphsToKeepInMixedPrecision>();
+        manager.register_pass<pass::AlignMixedFP32FP16Types>();
+        manager.run_passes(f);
+    }
+
+    // for (auto &item_1 : f->get_ordered_ops()) {
+    //     if (item_1->get_friendly_name() == "self.model.model.layers.0.self_attn.q_proj.weight_postponed_compression") {
+    //         std::cout << item_1->get_friendly_name() << " compile model constandfolding end: " << item_1->get_element_type() << std::endl;
+    //     }
+    // }    
+
     ov::element::TypeVector orig_result_types;
     if (!convert_input_output_precision) {
         const auto& results = f->get_results();
@@ -191,11 +230,17 @@ bool convert_function_precision(const std::shared_ptr<Model>& f,
         }
     }
 
+    // if (is_subgraph) {
+    //     for (auto &nn : f->get_ordered_ops()) {
+    //         std::cout << nn->get_friendly_name() << " type in convert begin: " << nn->get_element_type() << std::endl;
+    //     }
+    // }
     // Iterate over all nodes in topological order and then iterate over node outputs.
     // If output type mismatch given type we try to fuse type into this operation
     // otherwise we insert Convert operation.
     auto ops = f->get_ordered_ops();
     for (auto& node : ops) {
+        // if ()
         if (skip_precision_sensitive && fp16_compression_is_disabled(node) && has_fp16_compression)
             continue;
         is_changed |= convert_node_input_precision(node, precisions, type_to_extend);
@@ -207,9 +252,22 @@ bool convert_function_precision(const std::shared_ptr<Model>& f,
         is_changed |= fuse_type_to_parameter(param, precisions, convert_input_output_precision);
     }
 
+    // if (is_subgraph) {
+    //     for (auto &nn : f->get_ordered_ops()) {
+    //         std::cout << nn->get_friendly_name() << " type in convert end: " << nn->get_element_type() << std::endl;
+    //     }
+    // }
+
     if (is_changed)
         ops = f->get_ordered_ops();
-
+    // if (is_subgraph) {
+    //     for (auto &nn : f->get_ordered_ops()) {
+    //         if (nn->get_friendly_name() == "Result_186977") {
+    //             std::cout << "@@" << std::endl;
+    //             std::cout << nn->get_friendly_name() << " type in convert begin: " << nn->get_element_type() << std::endl;
+    //         }
+    //     }
+    // }
     auto register_constants = [&const_to_internal_output](const std::vector<std::shared_ptr<Node>>& ops) {
         for (auto& node : ops) {
             for (auto& input : node->inputs()) {
@@ -226,30 +284,31 @@ bool convert_function_precision(const std::shared_ptr<Model>& f,
     register_constants(ops);
 
     for (auto& node : ops) {
-        // skip precision sensitive nodes
-        if (skip_precision_sensitive && fp16_compression_is_disabled(node) && has_fp16_compression)
+        if (skip_precision_sensitive && fp16_compression_is_disabled(node) && has_fp16_compression && !is_subgraph)
             continue;
         // Recursively apply transformation for sub-graph based operations
         if (auto sub_graph_node = std::dynamic_pointer_cast<op::util::MultiSubGraphOp>(node)) {
             size_t sub_graphs_num = sub_graph_node->get_internal_subgraphs_size();
             for (size_t sub_graph_ind = 0; sub_graph_ind < sub_graphs_num; ++sub_graph_ind) {
-                is_changed |= convert_function_precision(sub_graph_node->get_function(static_cast<int>(sub_graph_ind)),
-                                                         type_to_fuse,
-                                                         type_to_extend,
-                                                         precisions,
-                                                         const_to_internal_output,
-                                                         has_fp16_compression,
-                                                         skip_precision_sensitive,
-                                                         is_changed || is_output_precision_changed,
-                                                         true,
-                                                         true);
+                is_changed |= convert_function_precision(pass,
+                                                        pass_config,
+                                                        sub_graph_node->get_function(static_cast<int>(sub_graph_ind)),
+                                                        type_to_fuse,
+                                                        type_to_extend,
+                                                        precisions,
+                                                        const_to_internal_output,
+                                                        has_fp16_compression,
+                                                        skip_precision_sensitive,
+                                                        is_changed || is_output_precision_changed,
+                                                        true,
+                                                        true);
             }
         }
         is_output_precision_changed |= convert_node_output_precision(node,
-                                                                     precisions,
-                                                                     type_to_fuse,
-                                                                     const_to_internal_output,
-                                                                     is_changed || is_output_precision_changed);
+                                                                    precisions,
+                                                                    type_to_fuse,
+                                                                    const_to_internal_output,
+                                                                    is_changed || is_output_precision_changed);
     }
 
     if (is_output_precision_changed) {
@@ -308,6 +367,7 @@ bool convert_function_precision(const std::shared_ptr<Model>& f,
 }
 
 bool convert_precision(ov::pass::PassBase& pass,
+                       std::shared_ptr<ov::pass::PassConfig> pass_config,
                        const std::shared_ptr<ov::Model>& f,
                        const type_to_fuse_map& type_to_fuse,
                        const type_to_fuse_map& type_to_extend,
@@ -319,7 +379,9 @@ bool convert_precision(ov::pass::PassBase& pass,
     // changing precision we need to understand which Constant consumers belongs
     // to the current ov::Model
     std::unordered_map<const ov::Node*, std::vector<Input<Node>>> const_to_internal_output;
-    return convert_function_precision(f,
+    return convert_function_precision(pass,
+                                      pass_config,
+                                      f,
                                       type_to_fuse,
                                       type_to_extend,
                                       precisions,
@@ -356,6 +418,23 @@ precisions_set_t find_all_used_precisions(const std::shared_ptr<ov::Model>& fn) 
 }  // namespace
 
 bool ov::pass::ConvertPrecision::run_on_model(const std::shared_ptr<ov::Model>& f) {
+    // for (auto &nn : f->get_ordered_ops()) {
+    //     if (nn->get_friendly_name() == "__module.model.model.layers.0.self_attn.q_proj/aten::linear/MatMul_164") {
+    //         std::cout << nn->get_friendly_name() << " type in run_on_model begin: " << nn->get_element_type() << std::endl;
+    //         size_t arg_count = nn->get_input_size();
+    //         for (size_t i = 0; i < arg_count; ++i) {
+    //             Node* dep = nn->get_input_node_ptr(arg_count - i - 1);
+    //             std::cout << dep->get_friendly_name() << " type in run_on_model begin: " << dep->get_element_type() << std::endl;
+    //         }
+    //     }
+    // }
+
+    // for (auto &item_1 : f->get_ordered_ops()) {
+    //     if (item_1->get_friendly_name() == "self.model.model.layers.0.self_attn.q_proj.weight_postponed_compression") {
+    //         std::cout << item_1->get_friendly_name() << "0 compile model constandfolding end: " << item_1->get_element_type() << std::endl;
+    //     }
+    // }
+
     const auto used_precisions_set = find_all_used_precisions(f);
     precisions_map used_precisions;
     for (const auto& p : used_precisions_set) {
@@ -368,7 +447,6 @@ bool ov::pass::ConvertPrecision::run_on_model(const std::shared_ptr<ov::Model>& 
         return false;
 
     bool has_fp16_compression = m_precisions.count(element::f32) > 0 && m_precisions[element::f32] == element::f16;
-
     if (m_keep_precision_sensitive_in_fp32 && has_fp16_compression) {
         pass::Manager manager(get_pass_config());
         // Mark subgraphs with disable_fp16_compression to keep them in FP32
@@ -416,6 +494,7 @@ bool ov::pass::ConvertPrecision::run_on_model(const std::shared_ptr<ov::Model>& 
         {opset4::Range::get_type_info_static(), fuse_type_to_range_v4},
         {opset9::Eye::get_type_info_static(), fuse_type_to_eye_v9},
         {opset10::Unique::get_type_info_static(), fuse_type_to_unique_v10},
+        // {opset1::Result::get_type_info_static(), fuse_type_to_logical<opset1::Result>},
         {opset8::RandomUniform::get_type_info_static(), fuse_type_to_random_uniform_v8}};
 
     for (const auto& it : m_additional_type_to_fuse_map) {
@@ -429,7 +508,18 @@ bool ov::pass::ConvertPrecision::run_on_model(const std::shared_ptr<ov::Model>& 
         {opset1::Reverse::get_type_info_static(), extend_reverse_type},
     };
 
+    // for (auto &nn : f->get_ordered_ops()) {
+    //     if (nn->get_friendly_name() == "__module.model.model.layers.0.self_attn.q_proj/aten::linear/MatMul_164") {
+    //         std::cout << nn->get_friendly_name() << " type in convert begin: " << nn->get_element_type() << std::endl;
+    //         size_t arg_count = nn->get_input_size();
+    //         for (size_t i = 0; i < arg_count; ++i) {
+    //             Node* dep = nn->get_input_node_ptr(arg_count - i - 1);
+    //             std::cout << dep->get_friendly_name() << " type in convert begin: " << dep->get_element_type() << std::endl;
+    //         }
+    //     }
+    // }
     bool is_changed = convert_precision(*this,
+                                        get_pass_config(),
                                         f,
                                         type_to_fuse,
                                         type_to_extend,
@@ -437,7 +527,16 @@ bool ov::pass::ConvertPrecision::run_on_model(const std::shared_ptr<ov::Model>& 
                                         has_fp16_compression,
                                         m_keep_precision_sensitive_in_fp32,
                                         m_convert_input_output_precision);
-
+    // for (auto &nn : f->get_ordered_ops()) {
+    //     if (nn->get_friendly_name() == "__module.model.model.layers.0.self_attn.q_proj/aten::linear/MatMul_164") {
+    //         std::cout << nn->get_friendly_name() << " type in convert end: " << nn->get_element_type() << std::endl;
+    //         size_t arg_count = nn->get_input_size();
+    //         for (size_t i = 0; i < arg_count; ++i) {
+    //             Node* dep = nn->get_input_node_ptr(arg_count - i - 1);
+    //             std::cout << dep->get_friendly_name() << " type in convert end: " << dep->get_element_type() << std::endl;
+    //         }
+    //     }
+    // }
     // to remove extra converts
     if (m_keep_precision_sensitive_in_fp32) {
         pass::Manager manager(get_pass_config());
@@ -445,7 +544,6 @@ bool ov::pass::ConvertPrecision::run_on_model(const std::shared_ptr<ov::Model>& 
         manager.register_pass<pass::ConstantFolding>();
         manager.run_passes(f);
     }
-
     (void)is_changed;  // ignored
 
     // Returning value is false because pass::Manager always apply Validation pass

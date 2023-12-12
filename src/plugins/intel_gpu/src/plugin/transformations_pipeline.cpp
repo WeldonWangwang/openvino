@@ -149,6 +149,7 @@ namespace ov {
 namespace intel_gpu {
 
 void TransformationsPipeline::apply(std::shared_ptr<ov::Model> func) {
+    std::cout << "do TF" << std::endl;
     OV_ITT_SCOPED_TASK(itt::domains::intel_gpu_plugin, "TransformationsPipeline::apply");
     using const_node_ptr = const std::shared_ptr<const ov::Node>;
 
@@ -242,7 +243,7 @@ void TransformationsPipeline::apply(std::shared_ptr<ov::Model> func) {
 
         manager.register_pass<ov::pass::MarkDequantizationSubgraph>(ov::element::TypeVector{ov::element::u8, ov::element::u4, ov::element::i4}, true);
 
-        const bool keep_precision_sensitive_in_fp32_1 = false;
+        const bool keep_precision_sensitive_in_fp32_1 = true;
         const bool convert_input_output_precision = false;
         manager.register_pass<ov::pass::ConvertPrecision>(fp_convert_precision_map,
                                                           empty_fuse_map,

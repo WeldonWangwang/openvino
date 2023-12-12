@@ -260,8 +260,19 @@ public:
 
     void invalidate_values();
     virtual void revalidate_and_infer_types() {
+        // std::cout << get_friendly_name() << std::endl;
+        auto users_ = get_users();
+        // for (auto &itt : users_) {
+        //     std::cout << itt->get_friendly_name() << std::endl;
+        // }
         invalidate_values();
+        // for (auto &itt : users_) {
+        //     std::cout << itt->get_friendly_name() << std::endl;
+        // }
         validate_and_infer_types();
+        // for (auto &itt : users_) {
+        //     std::cout << itt->get_friendly_name() << std::endl;
+        // }
     }
     /// \brief Get the string name for the type of the node, such as `Add` or `Multiply`.
     ///        The class name, must not contain spaces as it is used for codegen.

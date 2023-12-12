@@ -5,7 +5,7 @@
 file (GLOB SRC ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp)
 file (GLOB HDR ${CMAKE_CURRENT_SOURCE_DIR}/*.hpp)
               
-ie_add_sample(NAME llama_sampple
+ov_add_sample(NAME llama_sampple
               SOURCES ${SRC}
               HEADERS ${HDR}
               DEPENDENCIES format_reader ie_samples_utils)

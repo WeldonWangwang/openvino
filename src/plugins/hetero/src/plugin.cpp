@@ -21,6 +21,7 @@
 #include "openvino/runtime/properties.hpp"
 #include "openvino/util/common_util.hpp"
 #include "properties.hpp"
+#include "transformations/rt_info/old_api_map_element_type_attribute.hpp"
 
 ov::hetero::Plugin::Plugin() {
     set_device_name("HETERO");
@@ -96,17 +97,131 @@ std::pair<ov::SupportedOpsMap, ov::hetero::SubgraphsMappingInfo> ov::hetero::Plu
         const auto& default_device = (!allow_exception || !fallback_device) ? get_device_name() : "";
         // const auto& default_device = get_device_name();
         auto& device_config = properties_per_device.at(device_name);
-        if (fallback_device) {
+        std::cout << "@@@" << std::endl;
+        if (fallback_device && (strcmp(device_name.c_str(), "CPU") != 0)) {
             // Turn off memory control to get all supported nodes
             device_config[ov::query_model_uses_device_mem.name()] = false;
         }
+
+        // for (auto &item_1 : model->get_ordered_ops()) {
+        //     if (item_1->get_friendly_name() == "Parameter_30931") {
+        //         auto rt_info = item_1->get_rt_info();
+        //         auto new_type = get_old_api_map_element_type(item_1).value;
+        //         for (auto &info : rt_info) {
+        //             std::cout << info.first << std::endl;
+        //         }
+        //         // std::cout << item_1->get_rt_info() << std::endl;
+        //         std::cout << "item_1->get_rt_info()" << std::endl;
+        //     }
+        //     std::cout << item_1->get_friendly_name() << " hetero type begin: " << item_1->get_element_type() << std::endl;
+        // }
+
+        // for (auto &item_1 : model->get_ordered_ops()) {
+        //     if (item_1->get_friendly_name() == "__module.model.model.layers.11.mlp.gate_proj/aten::linear/MatMul_2609") {
+        //         std::cout << item_1->get_friendly_name() << " hetero type begin: " << item_1->get_element_type() << std::endl;
+        //         size_t arg_count = item_1->get_input_size();
+        //         for (size_t i = 0; i < arg_count; ++i) {
+        //             Node* dep = item_1->get_input_node_ptr(arg_count - i - 1);
+        //             std::cout << dep->get_friendly_name() << " hetero type begin: " << dep->get_element_type() << std::endl;
+        //         }
+        //     }
+        // }
+        if (device_name == "GPU.2") {
+            unsigned long total_len = 1;
+            for (auto &item_1 : model->get_ordered_ops()) {
+                if (item_1->get_friendly_name().find("DeviceSubgraph") != std::string::npos) {
+                    std::cout << item_1->get_friendly_name() << std::endl;
+                    // size_t arg_count = item_1->get_input_size();
+                    // for (size_t i = 0; i < arg_count; ++i) {
+                    //     Node* dep = item_1->get_input_node_ptr(arg_count - i - 1);
+                    //     std::cout << "input: " << dep->get_friendly_name() << std::endl;
+                    // }
+
+                    // for (size_t i = 0; i < item_1->get_output_size(); ++i) {
+                    //     std::cout<< "output: " << item_1->get_output_shape(i) << std::endl;;
+                    //     // if (get_output_element_type(i) != node->get_output_element_type(i) ||
+                    //     //     get_output_shape(i) != node->get_output_shape(i)) {
+                    //     //     return false;
+                    //     // }
+                    // }
+
+                    auto users_ = item_1->get_users();
+                    for (auto &itt : users_) {
+                        for (size_t j = 0; j < itt->get_input_size(); ++j) {
+                            // std::cout << itt.get_partial_shape() << std::endl;
+                            // std::cout << "output: " << itt->get_friendly_name() << " "
+                            //           << itt->get_input_partial_shape(j) << " "
+                            //           << itt->get_input_partial_shape(j).rank() << " "
+                            //           << itt->get_input_partial_shape(j)[1].get_length() << std::endl;
+                            for (int z = 0; z < itt->get_input_partial_shape(j).size(); z++) {
+                                try {
+                                    uint32_t len = itt->get_input_partial_shape(j)[z].get_length();
+                                    if (len >= 1)
+                                        total_len += len;
+                                } catch (...) {
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            std::cout << "total_len: " << total_len << std::endl;
+        }
+
+
         query_results[device_name] = get_core()->query_model(model, device_name, device_config);
+
+        // for (auto &item_1 : model->get_ordered_ops()) {
+        //     if (item_1->get_friendly_name() == "__module.model.model.layers.11.mlp.gate_proj/aten::linear/MatMul_2609") {
+        //         std::cout << item_1->get_friendly_name() << " hetero type end: " << item_1->get_element_type() << std::endl;
+        //         size_t arg_count = item_1->get_input_size();
+        //         for (size_t i = 0; i < arg_count; ++i) {
+        //             Node* dep = item_1->get_input_node_ptr(arg_count - i - 1);
+        //             std::cout << dep->get_friendly_name() << " hetero type end: " << dep->get_element_type() << std::endl;
+        //         }
+        //     }
+        //     if (item_1->get_friendly_name() == "DeviceSubgraph_188750") {
+        //         // skip precision sensitive nodes
+        //         std::cout << "^^" << std::endl;
+        //     }
+        // }
+
+        auto q_r = query_results[device_name];
+        std::cout << device_name << "q_r: " << q_r.size() << std::endl;
+        // if (device_name == "GPU.1") {
+        //     auto item_1 = q_r.find("__module.model.model.layers.11.mlp.gate_proj/aten::linear/MatMul_2609");
+        //     // q_r.erase(item_1);
+        //     int iii = 0;
+        //     // for (auto &item : q_r) {
+        //     //     if (iii > 2000) {
+        //     //         q_r.erase(item);
+        //     //     }
+        //     // }
+        //     q_r.erase(item_1, q_r.end()); 
+        //     // for (auto &iter = q_r.begin(); iter != q_r.end();)
+        //     // {
+        //     //     iii++;
+        //     //     if (iii > 2000) {
+        //     //         // delete iter->second;
+        //     //         // iter->second = nullptr;
+        //     //         q_r.erase(iter++);
+        //     //     }
+        //     // }
+        // }
+        // if (device_name == "CPU") {
+            // for (auto &item : q_r) {
+            //     if (item.first == "Parameter_363135") {
+            //         std::cout << "!!!" << std::endl;
+            //     }
+            //     std::cout << item.first << item.second << std::endl;
+            // }
+        // }
         // Update supported operations map which includes new operations
-        update_supported_ops(supported_ops_temp, query_results[device_name]);
+        update_supported_ops(supported_ops_temp, q_r);
         // Update supported operations map which includes original operations only
-        update_supported_ops(supported_ops_final, query_results[device_name]);
+        update_supported_ops(supported_ops_final, q_r);
         mapping_info =
-            ov::hetero::mask_model_subgraphs_by_ops(model, supported_ops_temp, m_cfg.dump_dot_files(), default_device);
+            ov::hetero::mask_model_subgraphs_by_ops(model, supported_ops_temp, false, default_device);
     }
     return {supported_ops_final, mapping_info};
 }

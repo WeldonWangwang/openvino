@@ -13,6 +13,7 @@
 #include "op/device_subgraph.hpp"
 #include "openvino/op/util/op_types.hpp"
 #include "openvino/pass/constant_folding.hpp"
+#include "transformations/convert_precision.hpp"
 #include "openvino/pass/manager.hpp"
 #include "openvino/runtime/internal_properties.hpp"
 #include "openvino/runtime/properties.hpp"
@@ -42,9 +43,84 @@ void ov::hetero::CompiledModel::compile_model(const std::shared_ptr<ov::Model>& 
     // in some cases topology split is happening after constant subgraph.
     // It may cause replacement of Constant by Parameter in such operations
     // like Reshape/Transpose/Gather and lead to unexpected dynamism or exception
-    ov::pass::Manager manager;
-    manager.register_pass<ov::pass::ConstantFolding>();
-    manager.run_passes(model);
+    // for (auto &item_1 : model->get_ordered_ops()) {
+    //     if (item_1->get_friendly_name() == "self.model.model.layers.0.self_attn.q_proj.weight") {
+    //         std::cout << item_1->get_friendly_name() << " compile model constandfolding end: " << item_1->get_element_type() << std::endl;
+    //     }
+    // }
+    // for (auto &item_1 : model->get_ordered_ops()) {
+    //     if (item_1->get_friendly_name() == "self.model.model.layers.0.self_attn.q_proj.weight_compressed") {
+    //         std::cout << item_1->get_friendly_name() << "4 compile model constandfolding end: " << item_1->get_element_type() << std::endl;
+    //     }
+    // }
+
+    // auto device_id = get_property(ov::device::id.name(), options).as<std::string>();
+    // auto context = get_default_contexts().at(device_id);
+    // const auto& device_info = context->get_engine().get_device_info();
+    // auto next_pow_of_2 = [] (float x) {
+
+    // auto meta_devices1 =
+    //     get_hetero_plugin()->get_properties_per_device(compiled_model_desc.device, m_cfg.get_device_properties());
+    // // disable caching for subgraphs, because the whole HETERO model is cached
+    // auto device_config1 = meta_devices[compiled_model_desc.device];
+
+    // std::cout << "do CF" << std::endl;
+    // {
+    //     ov::pass::Manager manager;
+    //     const auto fallback_precision = ov::element::f32;
+    //     std::vector<ov::element::Type> fp_element_types = {
+    //             ov::element::f32,
+    //             ov::element::f16,
+    //             ov::element::bf16
+    //     };
+    //     auto fp_precision_supported = [&](ov::element::Type e) -> bool {
+    //         switch (e) {
+    //             case ov::element::f16: return true;
+    //             case ov::element::f32: return true; // assume that all GPUs support f32 data type
+    //             case ov::element::f64: return true;
+    //             case ov::element::bf16: return false;
+    //             default: return false;
+    //         }
+    //         return false;
+    //     };
+    //     precisions_map fp_convert_precision_map = {
+    //             {ov::element::f64, ov::element::f32},
+    //             {ov::element::f32, ov::element::f16}
+    //     };
+    //     for (auto& et : fp_element_types) {
+    //         if (!fp_precision_supported(et)) {
+    //             bool has_valid_conversion = fp_convert_precision_map.count(et) && fp_precision_supported(fp_convert_precision_map[et]);
+    //             if (!has_valid_conversion) {
+    //                 fp_convert_precision_map.insert(std::make_pair(et, fallback_precision));
+    //             }
+    //         }
+    //     }
+    //     type_to_fuse_map empty_fuse_map = {};
+    //     const bool keep_precision_sensitive_in_fp32_1 = true;
+    //     const bool convert_input_output_precision = false;
+        // manager.register_pass<ov::pass::ConvertPrecision>(fp_convert_precision_map,
+        //                                                     empty_fuse_map,
+        //                                                     keep_precision_sensitive_in_fp32_1,
+        //                                                     convert_input_output_precision);
+        // manager.run_passes(model);
+    // }
+
+    // {
+    //     ov::pass::Manager manager;
+    //     manager.register_pass<ov::pass::ConstantFolding>();
+    //     manager.run_passes(model);
+    // }
+
+    // for (auto &item_1 : model->get_ordered_ops()) {
+    //     if (item_1->get_friendly_name() == "self.model.model.layers.0.self_attn.q_proj.weight_compressed") {
+    //         std::cout << item_1->get_friendly_name() << "6 compile model constandfolding end: " << item_1->get_element_type() << std::endl;
+    //     }
+    // }
+    // for (auto &item_1 : model->get_ordered_ops()) {
+    //     if (item_1->get_friendly_name() == "self.model.model.layers.0.self_attn.q_proj.weight") {
+    //         std::cout << item_1->get_friendly_name() << " compile model constandfolding end: " << item_1->get_element_type() << std::endl;
+    //     }
+    // }
 
     ov::SupportedOpsMap query_model_result;
     bool user_set_affinities = false;
@@ -58,7 +134,11 @@ void ov::hetero::CompiledModel::compile_model(const std::shared_ptr<ov::Model>& 
             user_set_affinities = true;
         }
     }
-
+    // for (auto &item_1 : model->get_ordered_ops()) {
+    //     if (item_1->get_friendly_name() == "self.model.model.layers.0.self_attn.q_proj.weight_compressed") {
+    //         std::cout << item_1->get_friendly_name() << "5 compile model constandfolding end: " << item_1->get_element_type() << std::endl;
+    //     }
+    // }
     auto compile_device_model = [&](CompiledModelDesc& compiled_model_desc, bool add_exclusive) {
         auto meta_devices =
             get_hetero_plugin()->get_properties_per_device(compiled_model_desc.device, m_cfg.get_device_properties());
@@ -124,10 +204,12 @@ void ov::hetero::CompiledModel::compile_model(const std::shared_ptr<ov::Model>& 
         m_compiled_submodels.resize(ordered_subgraphs.size());
         bool add_exclusive = ordered_subgraphs.size() > 1;
         size_t id = 0;
+        std::cout << "compiled model" << std::endl;
         for (const auto& subgraph : ordered_subgraphs) {
             m_compiled_submodels[id].device = subgraph->get_affinity();
             m_compiled_submodels[id].model = subgraph->get_function();
             compile_device_model(m_compiled_submodels[id], add_exclusive);
+            std::cout << "compiled model end " << id << std::endl;
             ++id;
         }
     }

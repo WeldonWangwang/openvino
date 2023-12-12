@@ -69,6 +69,6 @@ ov::AnyMap Configuration::get_device_properties() const {
 bool Configuration::dump_dot_files() const {
     bool res = dump_graph;
     if (std::getenv("OPENVINO_HETERO_VISUALIZE"))
-        res = true;
-    return res;
+        res = false;
+    return false;
 }

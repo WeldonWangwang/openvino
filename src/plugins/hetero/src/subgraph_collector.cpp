@@ -84,7 +84,7 @@ ov::hetero::SubgraphCollector::SubgraphCollector(const std::shared_ptr<ov::Model
 }
 
 bool ov::hetero::SubgraphCollector::is_graph_input_node(const ov::Node* node) const {
-    return ov::op::util::is_parameter(node) || ov::op::util::is_constant(node);
+    return ov::op::util::is_parameter(node) || ov::op::util::is_constant(node) || ov::is_type<ov::op::v0::Convert>(node);
 }
 
 void ov::hetero::SubgraphCollector::init() {
@@ -212,7 +212,7 @@ void ov::hetero::SubgraphCollector::split_subgraphs_by_parameter_results() {
     for (const auto& input : ordered_subgraph_inputs) {
         if (!is_graph_input_node(input.get_node())) {
             auto input_source_output = input.get_source_output();
-            if (!is_graph_input_node(input_source_output.get_node())) {
+            if (!ov::op::util::is_constant(input_source_output.get_node())) {
                 ordered_subgraph_outputs.push_back(input_source_output);
             }
         }
@@ -234,6 +234,15 @@ void ov::hetero::SubgraphCollector::split_subgraphs_by_parameter_results() {
             auto result = std::make_shared<ov::op::v0::Result>(output);
             ov::copy_runtime_info(output.get_node_shared_ptr(), result);
             _subgraph_ids.emplace(result, output_subgraph_id);
+
+            // if (result->get_friendly_name() == "Result_186799") {
+            //     std::cout << output.get_node()->get_friendly_name() << " " << output.get_node()->get_element_type() << std::endl;
+            //     std::cout << result->get_element_type() << std::endl;
+            //     std::cout << "@@" << std::endl;
+            // }
+            // auto tt = output.get_node();
+            // std::cout << tt->get_friendly_name() << " " << tt->get_element_type() << " " << result->get_friendly_name() << std::endl;
+            // std::cout << "@@" << std::endl;
             _intermediate_results.push_back(result);
             for (const auto& input_subset : input_subsets) {
                 const auto input_subgraph_id = input_subset.first;
@@ -604,10 +613,12 @@ ov::hetero::SubgraphsMappingInfo ov::hetero::mask_model_subgraphs_by_ops(std::sh
 
     SubgraphsVector ordered_subgraphs;
     SubgraphsMappingInfo mapping_info;
+    std::cout << "mask model order_ops size: " << model->get_ordered_ops().size() << std::endl;
     std::tie(ordered_subgraphs, mapping_info) =
         get_model_subgraphs(model, supported_ops, false, dump_dot_files, default_device);
 
     SubmodelsVector submodels{ordered_subgraphs.size()};
+    std::cout << "ordered_subgraphs.size(): " << ordered_subgraphs.size() << std::endl;
     for (size_t i = 0; i < ordered_subgraphs.size(); i++) {
         const auto& subgraph = ordered_subgraphs.at(i);
         auto submodel_name = name + '_' + std::to_string(i);
