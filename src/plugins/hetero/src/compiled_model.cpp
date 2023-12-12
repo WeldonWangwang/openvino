@@ -494,9 +494,6 @@ void ov::hetero::CompiledModel::export_model(std::ostream& model_stream) const {
 
     auto subnetworksNode = heteroNode.append_child("compiled_submodels");
     for (const auto& comp_model_desc : m_compiled_submodels) {
-        auto sub_comp_model = comp_model_desc.compiled_model;
-        OPENVINO_ASSERT(sub_comp_model);
-
         auto subnetworkNode = subnetworksNode.append_child("compiled_submodel");
         subnetworkNode.append_attribute("device").set_value(comp_model_desc.device.c_str());
     }
@@ -513,6 +510,7 @@ void ov::hetero::CompiledModel::export_model(std::ostream& model_stream) const {
     model_stream << std::endl;
 
     for (const auto& comp_model_desc : m_compiled_submodels) {
+        OPENVINO_ASSERT(comp_model_desc.compiled_model);
         if (get_plugin()->get_core()->device_supports_model_caching(comp_model_desc.device)) {
             try {
                 // Batch plugin reports property of low level plugin
@@ -523,7 +521,7 @@ void ov::hetero::CompiledModel::export_model(std::ostream& model_stream) const {
             } catch (ov::NotImplemented&) {
             }
         }
-        auto model = comp_model_desc.model;
+        auto& model = comp_model_desc.model;
         if (!model)
             OPENVINO_THROW("OpenVINO Model is empty");
 

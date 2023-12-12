@@ -46,7 +46,6 @@ from tests import (
     xfail_issue_82039,
     xfail_issue_90649,
     xfail_issue_91151,
-    xfail_issue_91490,
     xfail_issue_99949,
     xfail_issue_99950,
     xfail_issue_99952,
@@ -73,6 +72,8 @@ from tests import (
     xfail_issue_119922,
     xfail_issue_119925,
     xfail_issue_119926,
+    xfail_issue_122775,
+    xfail_issue_122776
 )
 from tests.tests_python.utils.onnx_backend import OpenVinoTestBackend
 
@@ -289,11 +290,6 @@ tests_expected_to_fail = [
     (
         xfail_issue_38710,
         "OnnxBackendNodeModelTest.test_reshape_allowzero_reordered_cpu",
-    ),
-    (
-        xfail_issue_91490,
-        "OnnxBackendNodeModelTest.test_tril_zero_cpu",
-        "OnnxBackendNodeModelTest.test_triu_zero_cpu",
     ),
     (
         skip_dynamic_model,
@@ -575,8 +571,6 @@ tests_expected_to_fail = [
         xfail_issue_99973,
         "OnnxBackendNodeModelTest.test_split_1d_uneven_split_opset18_cpu",
         "OnnxBackendNodeModelTest.test_split_2d_uneven_split_opset18_cpu",
-        "OnnxBackendNodeModelTest.test_split_zero_size_splits_opset13_cpu",
-        "OnnxBackendNodeModelTest.test_split_zero_size_splits_opset18_cpu",
     ),
     (
         xfail_issue_101965,
@@ -691,6 +685,14 @@ if platform.system() == 'Darwin':
             skip_issue_58676,
             "OnnxBackendNodeModelTest.test_div_uint8_cpu"
         )]
+    )
+
+if platform.system() == 'Linux' and platform.machine() in ['arm', 'armv7l', 'aarch64', 'arm64', 'ARM64']:
+    tests_expected_to_fail.extend(
+        [
+            (xfail_issue_122775, "OnnxBackendNodeModelTest.test_resize_downsample_scales_linear_cpu"),
+            (xfail_issue_122776, "OnnxBackendNodeModelTest.test_mish_expanded_cpu")
+        ]
     )
 
 for test_group in tests_expected_to_fail:
