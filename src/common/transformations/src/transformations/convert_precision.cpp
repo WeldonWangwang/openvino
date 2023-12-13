@@ -176,7 +176,9 @@ bool convert_node_input_precision(const std::shared_ptr<ov::Node>& node,
     return false;
 }
 
-bool convert_function_precision(const std::shared_ptr<Model>& f,
+bool convert_function_precision(ov::pass::PassBase& pass,
+                                std::shared_ptr<ov::pass::PassConfig> pass_config,
+                                const std::shared_ptr<Model>& f,
                                 const type_to_fuse_map& type_to_fuse,
                                 const type_to_fuse_map& type_to_extend,
                                 const precisions_map& precisions,
@@ -195,6 +197,14 @@ bool convert_function_precision(const std::shared_ptr<Model>& f,
         for (const auto& result : results) {
             orig_result_types.push_back(result->get_input_element_type(0));
         }
+    }
+
+    if (is_subgraph && skip_precision_sensitive) {
+        pass::Manager manager(pass_config);
+        // Mark subgraphs with disable_fp16_compression to keep them in FP32
+        // manager.register_pass<pass::MarkSugraphsToKeepInMixedPrecision>();
+        manager.register_pass<pass::AlignMixedFP32FP16Types>();
+        manager.run_passes(f);
     }
 
     // Iterate over all nodes in topological order and then iterate over node outputs.
@@ -239,22 +249,24 @@ bool convert_function_precision(const std::shared_ptr<Model>& f,
 
     for (auto& node : ops) {
         // skip precision sensitive nodes
-        if (skip_precision_sensitive && fp16_compression_is_disabled(node) && has_fp16_compression)
+        if (skip_precision_sensitive && fp16_compression_is_disabled(node) && has_fp16_compression && !is_subgraph)
             continue;
         // Recursively apply transformation for sub-graph based operations
         if (auto sub_graph_node = std::dynamic_pointer_cast<op::util::MultiSubGraphOp>(node)) {
             size_t sub_graphs_num = sub_graph_node->get_internal_subgraphs_size();
             for (size_t sub_graph_ind = 0; sub_graph_ind < sub_graphs_num; ++sub_graph_ind) {
-                is_changed |= convert_function_precision(sub_graph_node->get_function(static_cast<int>(sub_graph_ind)),
-                                                         type_to_fuse,
-                                                         type_to_extend,
-                                                         precisions,
-                                                         const_to_internal_output,
-                                                         has_fp16_compression,
-                                                         skip_precision_sensitive,
-                                                         is_changed || is_output_precision_changed,
-                                                         true,
-                                                         true);
+                is_changed |= convert_function_precision(pass,
+                                                        pass_config,
+                                                        sub_graph_node->get_function(static_cast<int>(sub_graph_ind)),
+                                                        type_to_fuse,
+                                                        type_to_extend,
+                                                        precisions,
+                                                        const_to_internal_output,
+                                                        has_fp16_compression,
+                                                        skip_precision_sensitive,
+                                                        is_changed || is_output_precision_changed,
+                                                        true,
+                                                        true);
             }
         }
         // if convert_input_output_precision flag is set, we don't need to preserve the original precision
@@ -328,6 +340,7 @@ bool convert_function_precision(const std::shared_ptr<Model>& f,
 }
 
 bool convert_precision(ov::pass::PassBase& pass,
+                       std::shared_ptr<ov::pass::PassConfig> pass_config,
                        const std::shared_ptr<ov::Model>& f,
                        const type_to_fuse_map& type_to_fuse,
                        const type_to_fuse_map& type_to_extend,
@@ -339,7 +352,9 @@ bool convert_precision(ov::pass::PassBase& pass,
     // changing precision we need to understand which Constant consumers belongs
     // to the current ov::Model
     std::unordered_map<const ov::Node*, std::vector<Input<Node>>> const_to_internal_output;
-    return convert_function_precision(f,
+    return convert_function_precision(pass,
+                                      pass_config,
+                                      f,
                                       type_to_fuse,
                                       type_to_extend,
                                       precisions,
@@ -452,6 +467,7 @@ bool ov::pass::ConvertPrecision::run_on_model(const std::shared_ptr<ov::Model>& 
     };
 
     bool is_changed = convert_precision(*this,
+                                        get_pass_config(),
                                         f,
                                         type_to_fuse,
                                         type_to_extend,
