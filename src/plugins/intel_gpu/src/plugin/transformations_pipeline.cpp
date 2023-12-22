@@ -279,7 +279,7 @@ void TransformationsPipeline::apply(std::shared_ptr<ov::Model> func) {
         // Ignore nodes that are not related to FullyConnected and allow ConstantFolding to be applied to them
         pass_config->set_callback<ov::pass::MarkDequantizationSubgraph>(is_non_decompression_multiply);
 
-        const bool keep_precision_sensitive_in_fp32_1 = false;
+        const bool keep_precision_sensitive_in_fp32_1 = true;
         const bool convert_input_output_precision = false;
         manager.register_pass<ov::pass::ConvertPrecision>(fp_convert_precision_map,
                                                           empty_fuse_map,
