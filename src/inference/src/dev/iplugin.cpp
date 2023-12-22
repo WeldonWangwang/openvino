@@ -7,6 +7,7 @@
 #include <openvino/core/graph_util.hpp>
 
 #include "openvino/op/convert.hpp"
+#include "openvino/op/gather.hpp"
 #include "openvino/op/util/op_types.hpp"
 #include "openvino/op/util/shape_of_base.hpp"
 
@@ -101,7 +102,6 @@ std::unordered_set<std::string> ov::get_supported_nodes(
     }
 
     auto transformed_model = model->clone();
-
     // Cleanup fused names if there are present in original model
     ov::pass::Manager m;
     m.register_pass<ov::pass::FusedNamesCleanup>();
@@ -160,11 +160,21 @@ std::unordered_set<std::string> ov::get_supported_nodes(
         return has_consumers;
     };
 
+    auto has_users_supported = [&](const NameSet& supported, const NodePtr& node) -> bool {
+        auto users_ = node->get_users();
+        for (auto &itt : users_) {
+            if (supported.count(itt->get_friendly_name())) {
+                return true;
+            }
+        }
+        return false;
+    };
+
     auto has_all_sources_supported =
         [&get_input_node](const NameSet& supported, const NodePtr& op, bool skip_const = true) -> bool {
         for (auto& input : op->inputs()) {
             const auto& node = get_input_node(input);
-            if ((skip_const && ov::op::util::is_constant(node)) || (ov::op::util::is_parameter(node)))
+            if ((skip_const && (ov::op::util::is_constant(node))) || (ov::op::util::is_parameter(node)))
                 continue;
             if (!supported.count(node->get_friendly_name()))
                 return false;
@@ -192,56 +202,46 @@ std::unordered_set<std::string> ov::get_supported_nodes(
         }
     };
 
-    bool breaks_control = false;
     // Walk over transformed model for special handing of Parameters/Constants/Results
     bool memory_control = memory_size_in_bytes > 0;
     auto available_memory_size = memory_size_in_bytes;
-    auto is_node_can_breaks_graph = [&](const NodePtr& node) -> bool {
-        return !is_node_under_memory_control || is_node_under_memory_control(node);
-    };
+    unsigned long total_size = 0;
+    bool start_split = false;
+    unsigned long total_ops_size = 0;
     for (auto&& op : ops) {
-        auto are_all_consumers_can_break_graph = [&]() {
-            // If break control is turned off or callback is not given
-            // than it doesn't matter who are consumers of this node
-            if (!breaks_control) {
-                return true;
-            }
-            // Otherwise check all consumers
-            for (auto&& output : op->outputs()) {
-                for (auto&& input : output.get_target_inputs()) {
-                    if (!is_node_can_breaks_graph(input.get_node()->shared_from_this())) {
-                        return false;
+        if (ov::op::util::is_constant(op)) {
+            const auto const_byte_size = op->get_element_type().size() * shape_size(op->get_shape());
+            total_ops_size += const_byte_size;
+        }
+    }
+    std::cout << "total_ops_size/2 = " << total_ops_size/2 << std::endl;
+    std::cout << "available_memory_size = " << available_memory_size << std::endl;
+    for (auto&& op : ops) {
+        if (memory_control) {
+            if (ov::op::util::is_constant(op)) {
+                const auto const_byte_size = op->get_element_type().size() * shape_size(op->get_shape());
+                total_size += const_byte_size;                
+                if (total_size >= total_ops_size/2) {
+                    if (!start_split) {
+                        start_split = true;                
                     }
                 }
             }
-            return true;
-        };
-        if (ov::op::util::is_constant(op)) {
-            // Mark Constants and all fused names as unsupported if they are have no
-            // supported consumers/sources
-            if (has_all_consumers_unsupported(supported, op)) {
-                remove_op_from_supported(op);
-                // If memory control is used, check available device memory
-            } else if (memory_control) {
-                const auto const_byte_size = op->get_element_type().size() * shape_size(op->get_shape());
-                if (const_byte_size > available_memory_size || !are_all_consumers_can_break_graph()) {
-                    // Memory limit is exceeded
+
+            if (start_split) {
+                if (!ov::op::util::is_constant(op)) {
+                    if (!has_unsupported_source(supported, op, false)) {
+                            continue;
+                    }
                     remove_op_from_supported(op);
-                    // Starting from this position we start to check node types
-                    breaks_control = true;
+                    for (auto& input : op->inputs()) {
+                        const auto& node = get_input_node(input);
+                        if (ov::op::util::is_constant(node)) {
+                            remove_op_from_supported(node);
+                        }
+                    }
                 } else {
-                    available_memory_size -= const_byte_size;
-                    breaks_control = false;
-                }
-            }
-        } else if (memory_control && has_unsupported_source(supported, op, is_node_can_breaks_graph(op))) {
-            // Operation has unsupported input constants in memory control mode when
-            // break control is turned off or any unsupported input if break control is turned on
-            remove_op_from_supported(op);
-            for (auto& input : op->inputs()) {
-                const auto& node = get_input_node(input);
-                if (ov::op::util::is_constant(node)) {
-                    remove_op_from_supported(node);
+                    remove_op_from_supported(op);
                 }
             }
         }
@@ -261,10 +261,9 @@ std::unordered_set<std::string> ov::get_supported_nodes(
             }
         }
     }
-
     if (memory_control) {
         for (auto& op : model->get_ordered_ops()) {
-            if (removed_nodes.count(op->get_friendly_name()) && has_all_sources_supported(supported, op)) {
+            if ((removed_nodes.count(op->get_friendly_name()) && has_all_sources_supported(supported, op)) && !ov::is_type<ov::op::v0::Convert>(op)) {
                 supported.insert(op->get_friendly_name());
             }
         }
@@ -272,6 +271,19 @@ std::unordered_set<std::string> ov::get_supported_nodes(
         // If memory control is off
         // mark all removed nodes as supported
         supported.insert(removed_nodes.begin(), removed_nodes.end());
+    }
+
+    bool changed = true;
+    if (memory_control) {
+        while (changed) {
+            changed = false;
+            for (auto& op : model->get_ordered_ops()) {
+                if (!supported.count(op->get_friendly_name()) && has_users_supported(supported, op)) {
+                    supported.insert(op->get_friendly_name());
+                    changed = true;
+                }
+            }
+        }
     }
 
     // Finally get intersection of all supported operation names
