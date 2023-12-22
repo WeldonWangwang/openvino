@@ -25,6 +25,7 @@
 #include "ov_ops/type_relaxed.hpp"
 #include "transformations/common_optimizations/disable_shapeof_constant_folding.hpp"
 #include "transformations/rt_info/disable_fp16_compression.hpp"
+#include "transformations/rt_info/original_precision_attribute.hpp"
 #include "transformations/utils/utils.hpp"
 
 using namespace testing;
@@ -2444,121 +2445,56 @@ TEST(TransformationTests, ConvertPrecision_assign_read_value_change_variable_typ
     ASSERT_TRUE(result.valid) << result.message;
 }
 
-class TestSubgraph : public ov::op::util::SubGraphOp {
-public:
-    OPENVINO_OP("TestSubgraph", "Test", ov::op::util::SubGraphOp);
+TEST(TransformationTests, ConvertPrecision_assign_read_value_preserve_orig_types_as_rt_attribute) {
+    shared_ptr<Model> model, model_ref;
+    pass::Manager manager;
 
-    TestSubgraph() = default;
-
-    TestSubgraph(const OutputVector& args, const std::shared_ptr<ov::Model>& body);
-
-    TestSubgraph(const NodeVector& args, const std::shared_ptr<ov::Model>& body);
-
-    bool visit_attributes(AttributeVisitor& visitor) override;
-
-    void validate_and_infer_types() override;
-
-    std::shared_ptr<Node> clone_with_new_inputs(const OutputVector& inputs) const override;
-
-private:
-    const ov::Model& body() const {
-        return *m_bodies[0];
-    }
-    ov::Model& body() {
-        return *m_bodies[0];
-    }
-    const std::shared_ptr<ov::Model>& body_ptr() const {
-        return m_bodies[0];
-    }
-    std::shared_ptr<ov::Model>& body_ptr() {
-        return m_bodies[0];
-    }
-
-};
-
-TestSubgraph::TestSubgraph(const ov::OutputVector& args, const std::shared_ptr<ov::Model>& body)
-    : SubGraphOp(args) {
-    SubGraphOp::set_function(body);
-    constructor_validate_and_infer_types();
-    for (size_t i = 0; i < body->get_parameters().size(); ++i)
-        m_input_descriptions[0].push_back(std::make_shared<InvariantInputDescription>(i, i));
-    for (size_t i = 0; i < body->get_output_size(); ++i)
-        m_output_descriptions[0].push_back(std::make_shared<BodyOutputDescription>(i, i));
-}
-
-TestSubgraph::TestSubgraph(const ov::NodeVector& args, const std::shared_ptr<ov::Model>& body)
-    : TestSubgraph(as_output_vector(args), body) {}
-
-std::shared_ptr<ov::Node> TestSubgraph::clone_with_new_inputs(const ov::OutputVector& inputs) const {
-    return std::make_shared<TestSubgraph>(inputs, body().clone());
-}
-
-void TestSubgraph::validate_and_infer_types() {
-    ov::ParameterVector old_parameters;
-    for (auto op : body_ptr()->get_parameters()) {
-        old_parameters.push_back(op);
-    }
-
-    for (size_t i = 0; i < get_input_size(); ++i) {
-        body_ptr()->replace_parameter(
-            i,
-            std::make_shared<ov::op::v0::Parameter>(get_input_element_type(i), get_input_partial_shape(i)));
-    }
-
-    body_ptr()->validate_nodes_and_infer_types();
-
-    for (size_t i = 0; i < body_ptr()->get_parameters().size(); i++) {
-        body_ptr()->get_parameters()[i]->set_friendly_name(old_parameters[i]->get_friendly_name());
-    }
-
-    set_output_size(body_ptr()->get_output_size());
-    for (size_t i = 0; i < get_output_size(); ++i) {
-        set_output_type(i, body_ptr()->get_output_element_type(i), body_ptr()->get_output_partial_shape(i));
-    }
-}
-
-bool TestSubgraph::visit_attributes(ov::AttributeVisitor& visitor) {
-    visitor.on_attribute("body", body_ptr());
-    visitor.on_attribute("input_descriptions", m_input_descriptions[0]);
-    visitor.on_attribute("output_descriptions", m_output_descriptions[0]);
-    return true;
-}
-
-TEST(TransformationTests, ConvertPrecision_subgraph1) {
-    std::shared_ptr<Model> f(nullptr);
     {
-        auto input_1 = make_shared<opset10::Parameter>(element::f32, Shape{1, 3, 224, 224});
-        auto exp_1 = make_shared<opset10::Exp>(input_1);
-        auto input_2 = make_shared<opset10::Parameter>(element::f32, Shape{1, 3, 224, 224});
-        auto reduction_axes = opset10::Constant::create(element::i64, Shape{1}, {-1});
-        auto reduce_sum_1 = make_shared<opset10::ReduceSum>(exp_1, reduction_axes);
+        auto variable = std::make_shared<ov::op::util::Variable>(
+            ov::op::util::VariableInfo{ov::PartialShape{10, 10}, ov::element::f32, "variable_name"});
 
-        auto factor_const = opset10::Constant::create(element::f16, Shape{1}, {-1});
-        auto factor_const_decompressed = make_shared<opset10::Convert>(factor_const, element::f32);
-        auto mul_1 = make_shared<opset10::Multiply>(reduce_sum_1, factor_const_decompressed);
-        auto submodel = make_shared<ov::Model>(NodeVector{mul_1}, ov::ParameterVector{input_1});
-        ParameterVector graph_parameters{submodel->inputs().size()+1};
-        OutputVector args{submodel->inputs().size()};
-        for (size_t i = 0; i < submodel->inputs().size(); i++) {
-            auto const& input = submodel->input(i);
-            graph_parameters[i] =
-                make_shared<ov::op::v0::Parameter>(input.get_element_type(), input.get_partial_shape());
-            args[i] = graph_parameters[i]->output(0);
-        }
-        auto subgraph_op = make_shared<TestSubgraph>(args, submodel);
-        auto matmul_1 = make_shared<opset10::MatMul>(subgraph_op->output(0), input_2);
-        graph_parameters[submodel->inputs().size()] = input_2;
-        f = make_shared<Model>(NodeVector{matmul_1}, graph_parameters);
+        auto input = make_shared<opset10::Parameter>(element::f32, Shape{10, 10});
+        auto read_value = make_shared<opset10::ReadValue>(input, variable);
 
-        pass::Manager manager;
+        auto some_value = opset10::Constant::create(element::f32, Shape{1}, {2});
+        auto mul = make_shared<opset10::Multiply>(read_value, some_value);
+        auto res = make_shared<opset10::Result>(mul);
+        auto assign = make_shared<opset10::Assign>(mul, variable);
+
+        model = make_shared<Model>(ResultVector{res}, SinkVector{assign}, ParameterVector{input});
 
         type_to_fuse_map empty_type_to_fuse_map = {};
         bool keep_precision_sensitive_in_fp32 = true;
         bool convert_input_output_precision = false;
+        bool store_original_precision_as_rt_attribute = true;
         manager.register_pass<pass::ConvertPrecision>(precisions_map{{element::f32, element::f16}},
                                                       empty_type_to_fuse_map,
                                                       keep_precision_sensitive_in_fp32,
-                                                      convert_input_output_precision);
-        ASSERT_NO_THROW(manager.run_passes(f));
+                                                      convert_input_output_precision,
+                                                      store_original_precision_as_rt_attribute);
+        manager.run_passes(model);
+        EXPECT_EQ(ov::get_original_precision(read_value), element::f32);
+        EXPECT_EQ(ov::get_original_precision(assign), element::f32);
     }
+
+    {
+        auto variable = std::make_shared<ov::op::util::Variable>(
+            ov::op::util::VariableInfo{ov::PartialShape{10, 10}, ov::element::f16, "variable_name"});
+
+        auto input = make_shared<opset10::Parameter>(element::f32, Shape{10, 10});
+        auto convert_1 = make_shared<opset10::Convert>(input, element::f16);
+        auto read_value = make_shared<opset10::ReadValue>(convert_1, variable);
+
+        auto some_value = opset10::Constant::create(element::f16, Shape{1}, {2});
+        auto mul = make_shared<opset10::Multiply>(read_value, some_value);
+        auto convert_2 = make_shared<opset10::Convert>(mul, element::f32);
+        auto res = make_shared<opset10::Result>(convert_2);
+        auto assign = make_shared<opset10::Assign>(mul, variable);
+
+        model_ref = make_shared<Model>(ResultVector{res}, SinkVector{assign}, ParameterVector{input});
+    }
+
+    const FunctionsComparator func_comparator = FunctionsComparator::with_default();
+    FunctionsComparator::Result result = func_comparator(model_ref, model);
+    ASSERT_TRUE(result.valid) << result.message;
 }

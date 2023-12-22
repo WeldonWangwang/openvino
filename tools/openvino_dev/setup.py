@@ -52,13 +52,6 @@ PKG_INSTALL_CFG = {
         'extract_entry_points': True,
         'extract_extras': True,
     },
-    "pot": {
-        'src_dir': OPENVINO_DIR / 'tools' / 'pot',
-        'black_list': ['*tests*'],
-        'prefix': 'pot',
-        'extract_entry_points': True,
-        'extract_requirements': True,
-    },
 }
 
 
@@ -278,8 +271,8 @@ def concat_files(output_file, input_files):
                 outfile.write(content)
     return output_file
 
-description_md = SCRIPT_DIR.parents[1] / 'docs' / 'install_guides' / 'pypi-openvino-dev.md'
-md_files = [description_md, SCRIPT_DIR.parents[1] / 'docs' / 'install_guides' / 'pre-release-note.md']
+description_md = SCRIPT_DIR.parents[1] / 'docs' / 'dev' / "pypi_publish" / 'pypi-openvino-dev.md'
+md_files = [description_md, SCRIPT_DIR.parents[1] / 'docs' / 'dev' / "pypi_publish" / 'pre-release-note.md']
 docs_url = 'https://docs.openvino.ai/2023.0/index.html'
 
 if(os.getenv('CI_BUILD_DEV_TAG')):

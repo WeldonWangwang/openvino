@@ -98,25 +98,7 @@ ConvertFullyConnectedToFullyConnectedCompressed::ConvertFullyConnectedToFullyCon
             return std::make_shared<ov::op::v0::Constant>(*constant, new_shape);
         };
 
-        // auto temp_node = fc->get_input_node_shared_ptr(0);
-        // const ov::Output<Node>& fc_input_a = fc->get_input_node_shared_ptr(0);
-        // const ov::Output<Node>& fc_input_a = fc->inputs()[0].get_source_output();
         const ov::Output<Node>& fc_input_a = fc->input(0).get_source_output();
-        // fc_input_a.m_index = 32;
-        // if (fc->get_input_node_shared_ptr(0)->get_friendly_name() == "DeviceSubgraph_183565") {
-        //     // auto oo = get_input_node(temp_node);
-        //     // auto oo1 = get_output_node(temp_node);
-        //     for (auto& input_ : fc->inputs()) {
-        //         // auto oo2 = get_output_node(input_);
-        //         auto oo = fc->get_input_node_shared_ptr(0);
-        //         std::cout << oo->get_friendly_name() << std::endl;
-        //         auto oo2 = fc->get_input_node_ptr(0);
-        //         std::cout << oo2->get_friendly_name() << std::endl;
-        //         // auto oo1 = fc->inputs();
-        //         // std::cout << oo1->get_friendly_name() << std::endl;
-        //         auto oo3 = get_input_node(input_);
-        //     }
-        // }
         const auto& scale = reshape_const_to_2d(pattern_map.at(mul_const_m).get_node_shared_ptr());
         std::shared_ptr<ov::Node> optional_zero_point = nullptr;
 
