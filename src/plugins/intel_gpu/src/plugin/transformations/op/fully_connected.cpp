@@ -13,6 +13,9 @@ FullyConnected::FullyConnected(const ov::Output<Node>& A,
                                const ov::Output<Node>& B,
                                const ov::element::Type output_type)
     : Op({A, B}), m_output_type(output_type) {
+    if (A.get_node()->get_friendly_name().find("DeviceSubgraph") != std::string::npos) {
+        std::cout << "##" << std::endl;
+    }
     validate_and_infer_types();
 }
 

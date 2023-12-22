@@ -198,12 +198,15 @@ bool convert_function_precision(ov::pass::PassBase& pass,
             orig_result_types.push_back(result->get_input_element_type(0));
         }
     }
+    // if (is_subgraph) {
+    //     std::cout << "########## is subgraph" << std::endl;
+    // }
 
-    if (is_subgraph && skip_precision_sensitive) {
-        pass::Manager manager(pass_config);
-        manager.register_pass<pass::AlignMixedFP32FP16Types>();
-        manager.run_passes(f);
-    }
+    // if (is_subgraph && skip_precision_sensitive) {
+    //     pass::Manager manager(pass_config);
+    //     manager.register_pass<pass::AlignMixedFP32FP16Types>();
+    //     manager.run_passes(f);
+    // }
 
     // Iterate over all nodes in topological order and then iterate over node outputs.
     // If output type mismatch given type we try to fuse type into this operation
@@ -252,6 +255,7 @@ bool convert_function_precision(ov::pass::PassBase& pass,
         // Recursively apply transformation for sub-graph based operations
         if (auto sub_graph_node = std::dynamic_pointer_cast<op::util::MultiSubGraphOp>(node)) {
             size_t sub_graphs_num = sub_graph_node->get_internal_subgraphs_size();
+            // std::cout << "sub_graphs_num: " << sub_graphs_num << std::endl;
             for (size_t sub_graph_ind = 0; sub_graph_ind < sub_graphs_num; ++sub_graph_ind) {
                 is_changed |= convert_function_precision(pass,
                                                         pass_config,

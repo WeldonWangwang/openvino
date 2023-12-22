@@ -96,17 +96,45 @@ std::pair<ov::SupportedOpsMap, ov::hetero::SubgraphsMappingInfo> ov::hetero::Plu
         const auto& default_device = (!allow_exception || !fallback_device) ? get_device_name() : "";
         // const auto& default_device = get_device_name();
         auto& device_config = properties_per_device.at(device_name);
-        if (fallback_device) {
+        if (fallback_device && strcmp(device_name.c_str(), "CPU") != 0) {
             // Turn off memory control to get all supported nodes
             device_config[ov::query_model_uses_device_mem.name()] = false;
         }
         query_results[device_name] = get_core()->query_model(model, device_name, device_config);
+
+        auto q_r = query_results[device_name];
+        // if (device_name == "GPU.1") {
+        //     for (auto &item : q_r) {
+        //         if (item.first == "__module.model.layers.15.mlp.up_proj/aten::linear/MatMul_4078") {
+        //             std::cout << "!!!" << std::endl;
+        //             std::cout << item.first << item.second << std::endl;
+        //         }
+        //     }
+        // }
+
+
+        // for (auto &item_1 : model->get_ordered_ops()) {
+        //     if (item_1->get_friendly_name() == "__module.model.layers.15.mlp.up_proj/aten::linear/MatMul_4078") {
+        //     // if (item_1->get_friendly_name() == "__module.model.layers.15.mlp/aten::mul/Multiply") {
+        //         std::cout << item_1->get_friendly_name() << " hetero type end: " << item_1->get_element_type() << item_1->get_input_partial_shape(0) << item_1->get_input_partial_shape(1) << std::endl;
+        //         size_t arg_count = item_1->get_input_size();
+        //         for (size_t i = 0; i < arg_count; ++i) {
+        //             Node* dep = item_1->get_input_node_ptr(arg_count - i - 1);
+        //             std::cout << dep->get_friendly_name() << " hetero type end: " << dep->get_element_type() << std::endl;
+        //         }
+        //     }
+        //     // if (item_1->get_friendly_name() == "DeviceSubgraph_188750") {
+        //     //     // skip precision sensitive nodes
+        //     //     std::cout << "^^" << std::endl;
+        //     // }
+        // }
+
         // Update supported operations map which includes new operations
         update_supported_ops(supported_ops_temp, query_results[device_name]);
         // Update supported operations map which includes original operations only
         update_supported_ops(supported_ops_final, query_results[device_name]);
         mapping_info =
-            ov::hetero::mask_model_subgraphs_by_ops(model, supported_ops_temp, m_cfg.dump_dot_files(), default_device);
+            ov::hetero::mask_model_subgraphs_by_ops(model, supported_ops_temp, true, default_device);
     }
     return {supported_ops_final, mapping_info};
 }
