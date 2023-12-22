@@ -10,7 +10,6 @@
 #include "openvino/op/gather.hpp"
 #include "openvino/op/util/op_types.hpp"
 #include "openvino/op/util/shape_of_base.hpp"
-
 #include "openvino/pass/manager.hpp"
 #include "transformations/common_optimizations/fused_names_cleanup.hpp"
 #include "transformations/rt_info/fused_names_attribute.hpp"
@@ -107,12 +106,6 @@ std::unordered_set<std::string> ov::get_supported_nodes(
     m.register_pass<ov::pass::FusedNamesCleanup>();
     m.run_passes(transformed_model);
 
-    for (auto&& op : transformed_model->get_ordered_ops()) {
-        if (op->get_friendly_name() == "MatMul_356293") {
-            std::cout << "MatMul_356293" << std::endl;    
-        }
-    }
-
     transform(transformed_model);
     auto ops = transformed_model->get_ordered_ops();
 
@@ -167,9 +160,9 @@ std::unordered_set<std::string> ov::get_supported_nodes(
     };
 
     auto has_users_supported = [&](const NameSet& supported, const NodePtr& node) -> bool {
-        auto users_ = node->get_users();
-        for (auto &itt : users_) {
-            if (supported.count(itt->get_friendly_name())) {
+        auto users = node->get_users();
+        for (auto& user : users) {
+            if (supported.count(user->get_friendly_name())) {
                 return true;
             }
         }
@@ -220,20 +213,14 @@ std::unordered_set<std::string> ov::get_supported_nodes(
             total_ops_size += const_byte_size;
         }
     }
-    std::cout << "total_ops_size/2 = " << total_ops_size/2 << std::endl;
-    std::cout << "available_memory_size = " << available_memory_size << std::endl;
-    int i = 0;
     for (auto&& op : ops) {
-        i++;
         if (memory_control) {
             if (ov::op::util::is_constant(op)) {
                 const auto const_byte_size = op->get_element_type().size() * shape_size(op->get_shape());
-                total_size += const_byte_size;                
-                if (total_size >= total_ops_size/2) {
-                    // std::cout << i << std::endl;
-                    // if (i >= 2115) {
+                total_size += const_byte_size;
+                if (total_size >= total_ops_size / 2) {
                     if (!start_split) {
-                        start_split = true;                
+                        start_split = true;
                     }
                 }
             }
@@ -241,7 +228,7 @@ std::unordered_set<std::string> ov::get_supported_nodes(
             if (start_split) {
                 if (!ov::op::util::is_constant(op)) {
                     if (!has_unsupported_source(supported, op, false)) {
-                            continue;
+                        continue;
                     }
                     remove_op_from_supported(op);
                     for (auto& input : op->inputs()) {
@@ -273,7 +260,8 @@ std::unordered_set<std::string> ov::get_supported_nodes(
     }
     if (memory_control) {
         for (auto& op : model->get_ordered_ops()) {
-            if ((removed_nodes.count(op->get_friendly_name()) && has_all_sources_supported(supported, op)) && !ov::is_type<ov::op::v0::Convert>(op)) {
+            if ((removed_nodes.count(op->get_friendly_name()) && has_all_sources_supported(supported, op)) &&
+                !ov::is_type<ov::op::v0::Convert>(op)) {
                 supported.insert(op->get_friendly_name());
             }
         }

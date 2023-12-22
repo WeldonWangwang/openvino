@@ -61,14 +61,7 @@ ConvertFullyConnectedToFullyConnectedCompressed::ConvertFullyConnectedToFullyCon
     auto data_m = any_input();
     auto weights_input_m = std::make_shared<ov::pass::pattern::op::Or>(ov::OutputVector{reshape_m, transpose_m, mul_m});
     auto fully_connected_m = wrap_type<op::FullyConnected>({data_m, weights_input_m});
-    // using NodePtr = std::shared_ptr<ov::Node>;
-    // auto get_output_node = [](const ov::Output<ov::Node>& output) -> NodePtr {
-    //     return output.get_node_shared_ptr();
-    // };
 
-    // auto get_input_node = [](const ov::Input<ov::Node>& input) {
-    //     return input.get_source_output();
-    // };
     ov::matcher_pass_callback callback = [=](ov::pass::pattern::Matcher& m) {
         const auto& pattern_map = m.get_pattern_value_map();
         OPENVINO_ASSERT(pattern_map.count(fully_connected_m));
