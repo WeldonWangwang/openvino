@@ -204,12 +204,19 @@ std::unordered_set<std::string> ov::get_supported_nodes(
     bool memory_control = memory_size_in_bytes > 0;
     unsigned long total_size = 0;
     bool start_split = false;
+    unsigned long total_ops_size = 0;
+    for (auto&& op : ops) {
+        if (ov::op::util::is_constant(op)) {
+            const auto const_byte_size = op->get_element_type().size() * shape_size(op->get_shape());
+            total_ops_size += const_byte_size;
+        }
+    }
     if (memory_control) {
         for (auto&& op : ops) {
             if (ov::op::util::is_constant(op) && !start_split) {
                 const auto const_byte_size = op->get_element_type().size() * shape_size(op->get_shape());
                 total_size += const_byte_size;
-                if (total_size >= memory_size_in_bytes) {
+                if (total_size >= total_ops_size / 2) {
                     if (!start_split) {
                         start_split = true;
                     }
