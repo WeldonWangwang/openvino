@@ -216,7 +216,7 @@ std::unordered_set<std::string> ov::get_supported_nodes(
             if (ov::op::util::is_constant(op) && !start_split) {
                 const auto const_byte_size = op->get_element_type().size() * shape_size(op->get_shape());
                 total_size += const_byte_size;
-                if (total_size >= total_ops_size / 2) {
+                if (total_size >= memory_size_in_bytes * 0.8) {
                     if (!start_split) {
                         start_split = true;
                     }
