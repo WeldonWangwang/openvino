@@ -670,7 +670,7 @@ private:
 class MockPluginSubtract : public MockPluginBase {
 public:
     MockPluginSubtract(const std::string& name)
-        : MockPluginBase(name, {"Parameter", "Result", "Add", "Constant", "Subtract"}) {}
+        : MockPluginBase(name, {"Parameter", "Result", "Add", "Constant", "Subtract", "Convert"}) {}
 
     const ov::Version& get_const_version() override {
         static const ov::Version version = {CI_BUILD_NUMBER, "openvino_mock_subtract_plugin"};
