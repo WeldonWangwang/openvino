@@ -132,7 +132,6 @@ void ov::hetero::CompiledModel::compile_model(const std::shared_ptr<ov::Model>& 
         auto cloned_model = model->clone();
         std::tie(query_model_result, m_mapping_info) =
             get_hetero_plugin()->query_model_update(cloned_model, full_properties, true);
-
         ov::hetero::op::DeviceSubgraphVector ordered_subgraphs;
         for (const auto& op : cloned_model->get_ordered_ops()) {
             if (const auto& subgraph = ov::as_type_ptr<ov::hetero::op::DeviceSubgraph>(op)) {

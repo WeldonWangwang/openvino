@@ -194,7 +194,6 @@ void TransformationsPipeline::apply(std::shared_ptr<ov::Model> func) {
         ov::pass::Manager manager;
         auto pass_config = manager.get_pass_config();
         manager.set_per_pass_validation(false);
-
         // Temporary solution, global rt info cleanup is needed
         for (auto& node : func->get_ops()) {
             ov::enable_constant_folding(node);

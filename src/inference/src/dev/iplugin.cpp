@@ -5,7 +5,7 @@
 #include "openvino/runtime/iplugin.hpp"
 
 #include <openvino/core/graph_util.hpp>
-
+#include "openvino/op/broadcast.hpp"
 #include "openvino/op/convert.hpp"
 #include "openvino/op/gather.hpp"
 #include "openvino/op/util/op_types.hpp"
@@ -94,9 +94,20 @@ std::unordered_set<std::string> ov::get_supported_nodes(
     std::function<bool(const std::shared_ptr<ov::Node>)> is_node_supported,
     uint64_t memory_size_in_bytes) {
     // Collect original operation names
+    bool memory_control = memory_size_in_bytes > 0;
     std::unordered_set<std::string> original_ops;
     for (auto&& node : model->get_ops()) {
         original_ops.emplace(node->get_friendly_name());
+        // if (node->get_friendly_name().find("Assign") != std::string::npos) {
+        //     if (const auto& assign = std::dynamic_pointer_cast<ov::op::util::AssignBase>(node)) {
+        //         std::cout << node->get_friendly_name() << " " << assign->get_variable_id() << std::endl;
+        //     }
+        // }
+        // if (node->get_friendly_name().find("ReadValue") != std::string::npos) {
+        //     if (const auto& assign = std::dynamic_pointer_cast<ov::op::util::VariableExtension>(node)) {
+        //         std::cout << node->get_friendly_name() << " " << assign->get_variable_id() << std::endl;
+        //     }
+        // }
     }
 
     auto transformed_model = model->clone();
@@ -124,11 +135,20 @@ std::unordered_set<std::string> ov::get_supported_nodes(
     // Collect all operation names even there are no such names in original model
     for (auto&& op : ops) {
         auto names = get_names_set(op);
-        if (is_node_supported(op)) {
-            supported.insert(names.begin(), names.end());
-        } else {
-            unsupported.insert(names.begin(), names.end());
-        }
+        // if (memory_control) {
+        //     if (is_node_supported(op) && op->get_friendly_name() != "conv1/7x7_s2") {
+        //         supported.insert(names.begin(), names.end());
+        //     } else {
+        //         unsupported.insert(names.begin(), names.end());
+        //         std::cout << op->get_friendly_name() << std::endl;
+        //     }
+        // } else {
+            if (is_node_supported(op)) {
+                supported.insert(names.begin(), names.end());
+            } else {
+                unsupported.insert(names.begin(), names.end());
+            }
+        // }
     }
 
     // If operation was fused into several operations where one is supported
@@ -136,6 +156,10 @@ std::unordered_set<std::string> ov::get_supported_nodes(
     for (auto&& name : unsupported) {
         supported.erase(name);
     }
+
+    // if (supported.count("Concat_284597")) {
+    //     std::cout << "Broadcast_284600" << std::endl;
+    // }
 
     auto get_output_node = [](const ov::Output<ov::Node>& output) -> NodePtr {
         return output.get_node_shared_ptr();
@@ -201,7 +225,6 @@ std::unordered_set<std::string> ov::get_supported_nodes(
     };
 
     // Walk over transformed model for special handing of Parameters/Constants/Results
-    bool memory_control = memory_size_in_bytes > 0;
     unsigned long total_size = 0;
     bool start_split = false;
     unsigned long total_ops_size = 0;
@@ -211,17 +234,68 @@ std::unordered_set<std::string> ov::get_supported_nodes(
             total_ops_size += const_byte_size;
         }
     }
+    int ii = 0;
+    std::map<std::string, int> pair_checker;
     if (memory_control) {
         for (auto&& op : ops) {
+            // if (op->get_friendly_name() == "Broadcast_284613") {
+            //     std::cout << "Broadcast_284613" << std::endl;
+            // }
+            if (const auto& assign = std::dynamic_pointer_cast<ov::op::util::VariableExtension>(op)) {
+                // std::cout << op->get_friendly_name() << " *** " << assign->get_variable_id() << std::endl;
+                // std::cout << assign->get_variable().get() << std::endl;
+                if (pair_checker.count(assign->get_variable_id()) == 0) {
+                    pair_checker[assign->get_variable_id()] = 1;
+                } else {
+                    pair_checker[assign->get_variable_id()]++;
+                }
+            }
+
+
+
+
+            ii++;
+            // if (op->get_friendly_name().find("ReadValue") != std::string::npos) {
+            //     std::cout << op->get_friendly_name() << std::endl;
+            // }
             if (ov::op::util::is_constant(op) && !start_split) {
                 const auto const_byte_size = op->get_element_type().size() * shape_size(op->get_shape());
                 total_size += const_byte_size;
                 if (total_size*1.2 >= memory_size_in_bytes) {
+                // if (op->get_friendly_name() == "ReadValue_279084") {
+                // if (op->get_friendly_name() == "ReadValue_279094") { // 31 works
+                // if (op->get_friendly_name() == "ReadValue_279026") {
+                // if (ii >= 3700) { // works
                     if (!start_split) {
-                        start_split = true;
+                        bool only_pairs = std::all_of(pair_checker.begin(),
+                                                      pair_checker.end(),
+                                                      [](const std::pair<std::string, int>& val) {
+                                                          return val.second == 2;
+                                                      });
+                        // std::cout << "ii = " << ii << " " << op->get_friendly_name() << std::endl;
+                        // for(auto iter = pair_checker.rbegin(); iter != pair_checker.rend(); iter++){
+                        //     std::cout << iter->first << " "<< iter->second << std::endl;
+                        // }
+                        start_split = only_pairs;
+                        // for (auto& input : op->inputs()) {
+                        //     const auto& node = get_input_node(input);
+                        //     remove_op_from_supported(node);
+                        // }
                     }
                 }
             }
+            
+            // if (start_split) {
+            //     //check assign-readvalue pair
+            //     if (const auto& assign = std::dynamic_pointer_cast<ov::op::util::AssignBase>(node)) {
+            //         pair_checker[assign->get_variable().get()].cnt_assign++;
+            //     } else if (const auto& read_value = std::dynamic_pointer_cast<ov::op::util::ReadValueBase>(node)) {
+            //         pair_checker[read_value->get_variable().get()].cnt_read_val++;
+            //     }
+            // }
+
+
+
             if (start_split) {
                 if (!ov::op::util::is_constant(op)) {
                     if (!has_unsupported_source(supported, op, false)) {
@@ -240,14 +314,27 @@ std::unordered_set<std::string> ov::get_supported_nodes(
             }
         }
     }
-
+    // if (supported.count("Broadcast_284600")) {
+    //     std::cout << "Broadcast_284600" << std::endl;
+    // }
     // Get removed nodes
     NameSet removed_nodes = get_removed_nodes(model, transformed_model);
+
+    // for (auto& op : model->get_ordered_ops()) {
+    //     const auto& name = op->get_friendly_name();
+    //     if (ov::is_type<ov::op::v3::Broadcast>(op) && (supported.count(name) || removed_nodes.count(name))) {
+    //         // Don't allow cut on ShapeOf
+    //         if (has_all_consumers_unsupported(supported, op) && has_all_consumers_unsupported(removed_nodes, op)) {
+    //             remove_op_from_supported(op);
+    //             removed_nodes.erase(name);
+    //         }
+    //     }
+    // }
 
     // Filter ShapeOfs
     for (auto& op : model->get_ordered_ops()) {
         const auto& name = op->get_friendly_name();
-        if (ov::is_type<ov::op::util::ShapeOfBase>(op) && (supported.count(name) || removed_nodes.count(name))) {
+        if ((ov::is_type<ov::op::util::ShapeOfBase>(op) || ov::is_type<ov::op::v3::Broadcast>(op)) && (supported.count(name) || removed_nodes.count(name))) {
             // Don't allow cut on ShapeOf
             if (has_all_consumers_unsupported(supported, op) && has_all_consumers_unsupported(removed_nodes, op)) {
                 remove_op_from_supported(op);
@@ -272,14 +359,16 @@ std::unordered_set<std::string> ov::get_supported_nodes(
         while (changed) {
             changed = false;
             for (auto& op : model->get_ordered_ops()) {
-                if (!supported.count(op->get_friendly_name()) && has_users_supported(supported, op)) {
+                if (!supported.count(op->get_friendly_name()) && has_users_supported(supported, op) && !unsupported.count(op->get_friendly_name())) {
                     supported.insert(op->get_friendly_name());
                     changed = true;
                 }
             }
         }
     }
-
+    // if (supported.count("Broadcast_284600")) {
+    //     std::cout << "Broadcast_284600" << std::endl;
+    // }
     // Finally get intersection of all supported operation names
     // and operation names from original model
     NameSet res;
@@ -320,5 +409,13 @@ std::unordered_set<std::string> ov::get_supported_nodes(
         }
     }
 
+    // std::cout << "****************************************" << std::endl;
+    // for (auto it = res.cbegin(); it != res.cend(); it++) {
+    //     std::cout << *it << std::endl;
+    // }
+    // std::cout << "****************************************" << std::endl;
+    // if (res.count("Broadcast_284600")) {
+    //     std::cout << "Broadcast_284600" << std::endl;
+    // }
     return res;
 }

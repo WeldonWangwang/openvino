@@ -219,7 +219,7 @@ bool convert_function_precision(ov::pass::PassBase& pass,
 
     if (is_subgraph && skip_precision_sensitive) {
         pass::Manager manager(pass_config);
-        manager.register_pass<pass::AlignMixedFP32FP16Types>();
+        manager.register_pass<pass::AlignMixedFP32FP16Types>(is_subgraph);
         manager.run_passes(f);
     }
 
@@ -486,7 +486,8 @@ bool ov::pass::ConvertPrecision::run_on_model(const std::shared_ptr<ov::Model>& 
         {opset8::RandomUniform::get_type_info_static(), fuse_type_to_random_uniform_v8},
         {opset13::Multinomial::get_type_info_static(), fuse_type_to_multinomial_v13},
         {opset1::PriorBox::get_type_info_static(), fuse_type_to_prior_box<opset1::PriorBox>},
-        {opset8::PriorBox::get_type_info_static(), fuse_type_to_prior_box<opset8::PriorBox>}};
+        {opset8::PriorBox::get_type_info_static(), fuse_type_to_prior_box<opset8::PriorBox>},
+        {opset1::PriorBoxClustered::get_type_info_static(), fuse_type_to_prior_box<opset1::PriorBoxClustered>}};
 
     for (const auto& it : m_additional_type_to_fuse_map) {
         type_to_fuse[it.first] = it.second;
