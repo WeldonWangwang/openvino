@@ -109,16 +109,15 @@ std::pair<ov::SupportedOpsMap, ov::hetero::SubgraphsMappingInfo> ov::hetero::Plu
     // }
     // auto params = model->get_parameters();
     // Remove parameters added by preprocessing
-    // ResultVector new_outputs;
-    // for (auto& param : model->get_parameters()) {
-    //     if (param->get_users().size() == 0) {
-    //         auto result = std::make_shared<ov::op::v0::Result>(param);
-    //         ov::copy_runtime_info(param->shared_from_this(), result);
-    //         new_outputs.push_back(result);
-    //     }
-    // }
-    // model->add_results(new_outputs);
-
+    ResultVector new_outputs;
+    for (auto& param : model->get_parameters()) {
+        if (param->get_users().size() == 0) {
+            auto result = std::make_shared<ov::op::v0::Result>(param);
+            ov::copy_runtime_info(param->shared_from_this(), result);
+            new_outputs.push_back(result);
+        }
+    }
+    model->add_results(new_outputs);
     for (const auto& device_name : device_names) {
         // If there are some unsupported operations and it is a last device
         // exception should be raised when allowed
