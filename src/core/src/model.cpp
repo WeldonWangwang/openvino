@@ -54,9 +54,6 @@ void check_all_parameters_registered(const std::vector<shared_ptr<ov::Node>>& or
             std::find(parameters.begin(), parameters.end(), node) == parameters.end())
             unregistered_parameters << node << std::endl;
     }
-    if (!unregistered_parameters.str().empty()) {
-        std::cout << "!!!!!!" << std::endl;
-    }
     OPENVINO_ASSERT(unregistered_parameters.str().empty(),
                     "Model references undeclared parameters: ",
                     unregistered_parameters.str());
@@ -255,9 +252,7 @@ void ov::Model::validate_nodes_and_infer_types() const {
             pair_checker[read_value->get_variable().get()].cnt_read_val++;
         }
     }
-    if (!unregistered_parameters.str().empty()) {
-        std::cout << "!!!!!!" << std::endl;
-    }
+
     OPENVINO_ASSERT(unregistered_parameters.str().empty(),
                     "Model references undeclared parameters: ",
                     unregistered_parameters.str());
