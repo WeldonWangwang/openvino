@@ -56,6 +56,7 @@ HETERO:
     - TEMPLATE
     - C_API
     - Python_API
+    - NVIDIA
   build:
     - IR_FE
 
@@ -199,6 +200,9 @@ IE_Tests:
     - IR_FE
 
 MO:
+  revalidate:
+    - PyTorch_FE
+    - TF_FE
   build:
     - Python_API
 
