@@ -78,9 +78,49 @@ ov::hetero::SubgraphCollector::SubgraphCollector(const std::shared_ptr<ov::Model
       _node_input_dependencies{},
       _subgraph_inputs{},
       _subgraph_parameter_to_prev_result{} {
+    // for (auto ii : _origin_parameters) {
+    //     std::cout << ii->get_friendly_name() << std::endl;
+    // }
+    // for (auto first = _origin_parameters.begin(); first < _origin_parameters.end(); ++first) {
+    //     if (first->get()->get_friendly_name() == "attention_mask") {
+    //         _origin_parameters.erase(first);
+    //         first--;
+    //     }
+    // }
+    // for (auto first = _ordered_ops.begin(); first < _ordered_ops.end(); ++first) {
+    //     if (first->get()->get_friendly_name() == "attention_mask") {
+    //         _ordered_ops.erase(first);
+    //         first--;
+    //     }
+    // }
+    // for (auto first = _origin_sinks.begin(); first < _origin_sinks.end(); ++first) {
+    //     if (first->get()->get_friendly_name() == "attention_mask") {
+    //         _origin_sinks.erase(first);
+    //         first--;
+    //     }
+    // }
+    // for (auto first = _origin_results.begin(); first < _origin_results.end(); ++first) {
+    //     if (first->get()->get_friendly_name() == "attention_mask") {
+    //         _origin_results.erase(first);
+    //         first--;
+    //     }
+    // }
+    // for (auto ii : _origin_parameters) {
+    //     std::cout << ii->get_friendly_name() << std::endl;
+    // }
     init();
     split_cyclic_dependencies();
     _subgraph_ids = collect_subgraphs_ids();
+    for(auto iter = _subgraph_ids.begin(); iter != _subgraph_ids.end(); iter++){
+        // std::cout << iter->first->get_friendly_name() << " " << iter->second << std::endl;
+        if (iter->first->get_friendly_name() == "attention_mask") {
+            std::cout << iter->first->get_friendly_name() << " " << iter->second << std::endl;
+            auto users_ = iter->first->get_users();
+            for (auto itt : users_) {
+                std::cout << itt->get_friendly_name() << std::endl;
+            }
+        }
+    }
 }
 
 bool ov::hetero::SubgraphCollector::is_graph_input_node(const ov::Node* node) const {
@@ -608,11 +648,14 @@ ov::hetero::SubgraphsMappingInfo ov::hetero::mask_model_subgraphs_by_ops(std::sh
         get_model_subgraphs(model, supported_ops, false, dump_dot_files, default_device);
 
     SubmodelsVector submodels{ordered_subgraphs.size()};
+    std::cout << "ordered_subgraphs.size(): " << ordered_subgraphs.size() << std::endl;
     for (size_t i = 0; i < ordered_subgraphs.size(); i++) {
         const auto& subgraph = ordered_subgraphs.at(i);
         auto submodel_name = name + '_' + std::to_string(i);
+        std::cout << "make model begin" << std::endl;
         submodels[i] =
             std::make_shared<ov::Model>(subgraph._results, subgraph._sinks, subgraph._parameters, submodel_name);
+        std::cout << "make model end" << std::endl;
         const auto& submodel = submodels[i];
         // Check whether model is subgraph already
         bool is_subgraph = ov::op::util::has_op_with_type<ov::hetero::op::DeviceSubgraph>(submodel);

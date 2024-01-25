@@ -14,6 +14,7 @@
 
 #include "compiled_model.hpp"
 #include "itt.hpp"
+#include "openvino/core/rt_info.hpp"
 #include "openvino/core/graph_util.hpp"
 #include "openvino/runtime/device_id_parser.hpp"
 #include "openvino/runtime/internal_properties.hpp"
@@ -97,6 +98,27 @@ std::pair<ov::SupportedOpsMap, ov::hetero::SubgraphsMappingInfo> ov::hetero::Plu
     ov::SupportedOpsMap supported_ops_final;
     std::map<std::string, ov::SupportedOpsMap> query_results;
     ov::hetero::SubgraphsMappingInfo mapping_info;
+    // auto _ordered_ops = model->get_parameters();
+    // for (auto first = _ordered_ops.begin(); first < _ordered_ops.end(); ++first) {
+    //     if (first->get()->get_friendly_name() == "attention_mask") {
+    //         _ordered_ops.erase(first);
+    //         if (auto )
+    //         model->remove_parameter(ov::as_type_ptr<ov::op::v0::Parameter>(first->get()));
+    //         first--;
+    //     }
+    // }
+    // auto params = model->get_parameters();
+    // Remove parameters added by preprocessing
+    // ResultVector new_outputs;
+    // for (auto& param : model->get_parameters()) {
+    //     if (param->get_users().size() == 0) {
+    //         auto result = std::make_shared<ov::op::v0::Result>(param);
+    //         ov::copy_runtime_info(param->shared_from_this(), result);
+    //         new_outputs.push_back(result);
+    //     }
+    // }
+    // model->add_results(new_outputs);
+
     for (const auto& device_name : device_names) {
         // If there are some unsupported operations and it is a last device
         // exception should be raised when allowed
@@ -108,13 +130,37 @@ std::pair<ov::SupportedOpsMap, ov::hetero::SubgraphsMappingInfo> ov::hetero::Plu
             // Turn off memory control to get all supported nodes
             device_config[ov::query_model_uses_device_mem.name()] = false;
         }
+        std::cout << "model->get_ordered_ops size: " << model->get_ordered_ops().size() << std::endl;
+        // for (auto &item_1 : model->get_ordered_ops()) {
+        //     // if (item_1->get_friendly_name() == "Assign_278995") {
+        //         // auto rt_info = item_1->get_rt_info();
+        //         // // auto new_type = get_old_api_map_element_type(item_1).value;
+        //         // for (auto &info : rt_info) {
+        //         //     std::cout << info.first << std::endl;
+        //         // }
+        //         // // std::cout << item_1->get_rt_info() << std::endl;
+        //         // std::cout << "item_1->get_rt_info()" << std::endl;
+        //     if (auto graph_node = std::dynamic_pointer_cast<ov::op::v6::Assign>(item_1)) {
+        //         std::cout << "is assign" << std::endl;
+        //         std::cout << item_1->get_friendly_name() << graph_node->get_variable_id() << std::endl;
+        //     }
+        //     // }
+        //     // std::cout << item_1->get_friendly_name() << " hetero type begin: " << item_1->get_element_type() << std::endl;
+        // }
+
         query_results[device_name] = get_core()->query_model(model, device_name, device_config);
+        std::cout << "query_results[device_name]: " << query_results[device_name].size() << std::endl;
+        auto q_r = query_results[device_name];
+        // if (device_name == "GPU.1") {
+        //     auto item_1 = q_r.find("attention_mask");
+        //     q_r.erase(item_1);
+        // }
         // Update supported operations map which includes new operations
-        update_supported_ops(supported_ops_temp, query_results[device_name]);
+        update_supported_ops(supported_ops_temp, q_r);
         // Update supported operations map which includes original operations only
-        update_supported_ops(supported_ops_final, query_results[device_name]);
+        update_supported_ops(supported_ops_final, q_r);
         mapping_info =
-            ov::hetero::mask_model_subgraphs_by_ops(model, supported_ops_temp, m_cfg.dump_dot_files(), default_device);
+            ov::hetero::mask_model_subgraphs_by_ops(model, supported_ops_temp, false, default_device);
     }
     return {supported_ops_final, mapping_info};
 }
