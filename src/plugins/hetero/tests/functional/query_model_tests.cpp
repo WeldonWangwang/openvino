@@ -99,7 +99,7 @@ TEST_F(HeteroTests, query_dynamic_model_on_mixed) {
     ASSERT_TRUE(names.count("sub"));
 }
 
-TEST_F(HeteroTests, query_model_on_single_parameter) {
+TEST_F(HeteroTests, query_model_on_independent_parameter) {
     ov::SupportedOpsMap supported_ops;
     const std::string dev_name = "MOCK0.1";
     const auto model = create_model_with_independent_parameter();

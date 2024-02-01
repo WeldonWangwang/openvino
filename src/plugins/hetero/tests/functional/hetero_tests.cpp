@@ -8,7 +8,6 @@
 #include <string>
 
 #include "common_test_utils/file_utils.hpp"
-#include "ie_plugin_config.hpp"
 #include "openvino/core/any.hpp"
 #include "openvino/core/except.hpp"
 #include "openvino/opsets/opset11.hpp"
@@ -177,6 +176,7 @@ std::shared_ptr<ov::Model> ov::hetero::tests::HeteroTests::create_model_with_ind
     result->set_friendly_name("res");
     return std::make_shared<ov::Model>(ov::ResultVector{result}, ov::ParameterVector{param1, param2});
 }
+
 // Mock plugins
 
 class MockCompiledModel : public ov::ICompiledModel {
@@ -607,7 +607,6 @@ public:
             RO_property(ov::available_devices.name()),
             RO_property(ov::loaded_from_cache.name()),
             RO_property(ov::device::uuid.name()),
-            RO_property(METRIC_KEY(IMPORT_EXPORT_SUPPORT)),
         };
         // the whole config is RW before network is loaded.
         const static std::vector<ov::PropertyName> rwProperties{
@@ -649,23 +648,9 @@ public:
             std::vector<std::string> capabilities;
             capabilities.push_back(ov::device::capability::EXPORT_IMPORT);
             return decltype(ov::device::capabilities)::value_type(capabilities);
-        } else if (name == "SUPPORTED_CONFIG_KEYS") {  // TODO: Remove this key
-            std::vector<std::string> configs;
-            for (const auto& property : rwProperties) {
-                configs.emplace_back(property);
-            }
-            return configs;
-        } else if (METRIC_KEY(IMPORT_EXPORT_SUPPORT) == name) {
-            return true;
         } else if (ov::internal::caching_properties == name) {
             std::vector<ov::PropertyName> caching_properties = {ov::device::uuid};
             return decltype(ov::internal::caching_properties)::value_type(caching_properties);
-        } else if (name == "SUPPORTED_METRICS") {  // TODO: Remove this key
-            std::vector<std::string> configs;
-            for (const auto& property : roProperties) {
-                configs.emplace_back(property);
-            }
-            return configs;
         } else if (name == ov::loaded_from_cache.name()) {
             return m_loaded_from_cache;
         } else if (name == ov::enable_profiling.name()) {
@@ -709,7 +694,6 @@ public:
             RO_property(ov::available_devices.name()),
             RO_property(ov::loaded_from_cache.name()),
             RO_property(ov::device::uuid.name()),
-            RO_property(METRIC_KEY(IMPORT_EXPORT_SUPPORT)),
         };
         // the whole config is RW before network is loaded.
         const static std::vector<ov::PropertyName> rwProperties{
@@ -751,23 +735,9 @@ public:
             return m_loaded_from_cache;
         } else if (name == ov::enable_profiling.name()) {
             return decltype(ov::enable_profiling)::value_type{m_profiling};
-        } else if (name == "SUPPORTED_CONFIG_KEYS") {  // TODO: Remove this key
-            std::vector<std::string> configs;
-            for (const auto& property : rwProperties) {
-                configs.emplace_back(property);
-            }
-            return configs;
-        } else if (METRIC_KEY(IMPORT_EXPORT_SUPPORT) == name) {
-            return true;
         } else if (ov::internal::caching_properties == name) {
             std::vector<ov::PropertyName> caching_properties = {ov::device::uuid};
             return decltype(ov::internal::caching_properties)::value_type(caching_properties);
-        } else if (name == "SUPPORTED_METRICS") {  // TODO: Remove this key
-            std::vector<std::string> configs;
-            for (const auto& property : roProperties) {
-                configs.emplace_back(property);
-            }
-            return configs;
         }
         OPENVINO_THROW("Unsupported property: ", name);
     }
