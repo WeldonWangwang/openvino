@@ -83,9 +83,16 @@ std::unordered_set<std::string> ov::get_supported_nodes(
     const std::shared_ptr<const ov::Model>& model,
     std::function<void(std::shared_ptr<ov::Model>&)> transform,
     std::function<bool(const std::shared_ptr<ov::Node>)> is_node_supported,
-    uint64_t memory_size_in_bytes) {
+    float memory_size_in_bytes) {
     // Collect original operation names
-    bool memory_control = memory_size_in_bytes > 0;
+    std::cout << "memory_size_in_bytes: " << memory_size_in_bytes << std::endl;
+    using NameSet = std::unordered_set<std::string>;
+    using NodePtr = std::shared_ptr<ov::Node>;
+    NameSet res;
+    if (memory_size_in_bytes == 0) {
+        return res;
+    }
+    bool memory_control = memory_size_in_bytes < 1;
     std::unordered_set<std::string> original_ops;
     for (auto&& node : model->get_ops()) {
         original_ops.emplace(node->get_friendly_name());
@@ -100,8 +107,6 @@ std::unordered_set<std::string> ov::get_supported_nodes(
     transform(transformed_model);
     auto ops = transformed_model->get_ordered_ops();
 
-    using NameSet = std::unordered_set<std::string>;
-    using NodePtr = std::shared_ptr<ov::Node>;
 
     NameSet supported;
     NameSet unsupported;
@@ -241,14 +246,14 @@ std::unordered_set<std::string> ov::get_supported_nodes(
             if (ov::op::util::is_constant(op) && !start_split) {
                 const auto const_byte_size = op->get_element_type().size() * shape_size(op->get_shape());
                 total_size += const_byte_size;
-                if (total_size * 1.2 >= memory_size_in_bytes) {
+                if (total_size >= memory_size_in_bytes * total_ops_size) {
                     if (!start_split) {
                         start_split = check_pairs(pair_checker_temp);
-                        if (start_split) {
-                            if ((total_ops_size - total_size) / memory_size_in_bytes < 0.1) {
-                                break;
-                            }
-                        }
+                        // if (start_split) {
+                        //     if ((total_ops_size - total_size) / memory_size_in_bytes < 0.1) {
+                        //         break;
+                        //     }
+                        // }
                     }
                 }
             }
@@ -304,7 +309,6 @@ std::unordered_set<std::string> ov::get_supported_nodes(
     }
     // Finally get intersection of all supported operation names
     // and operation names from original model
-    NameSet res;
     for (auto&& name : supported) {
         if (original_ops.count(name)) {
             res.insert(name);

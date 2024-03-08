@@ -758,7 +758,7 @@ static constexpr Property<bool, PropertyMutability::RW> enable_mmap{"ENABLE_MMAP
  *   - False doesn't take device memory into account during query model
  * @ingroup ov_runtime_cpp_prop_api
  */
-static constexpr Property<bool, PropertyMutability::RW> query_model_uses_device_mem{"QUERY_MODEL_USES_DEVICE_MEM"};
+static constexpr Property<float, PropertyMutability::RW> query_model_uses_device_mem{"QUERY_MODEL_USES_DEVICE_MEM"};
 
 /**
  * @brief Namespace with device properties
