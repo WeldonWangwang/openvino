@@ -123,9 +123,8 @@ std::pair<ov::SupportedOpsMap, ov::hetero::SubgraphsMappingInfo> ov::hetero::Plu
         bool config_update_flag = false;
         auto supported_properties = get_core()->get_property(device_name, ov::supported_properties);
         if (ov::util::contains(supported_properties, ov::query_model_uses_device_mem)) {
-            if (fallback_device && !config_update_flag) {
+            if (fallback_device) {
                 device_config[ov::query_model_uses_device_mem.name()] = 1.0f;
-                config_update_flag = true;
             } else {
                 double total_ops_size = 0;
                 for (auto&& op : model->get_ordered_ops()) {
@@ -148,8 +147,15 @@ std::pair<ov::SupportedOpsMap, ov::hetero::SubgraphsMappingInfo> ov::hetero::Plu
                     all_device_mem += devic_mem.second;
                 }
                 if (!config_update_flag) {
-                    float model_ratio = device_mem_map[device_name] * 1.0 / all_device_mem;
-                    device_config[ov::query_model_uses_device_mem.name()] = model_ratio;
+                    if (device_mem_map.size() > 1) {
+                        float model_ratio = device_mem_map[device_name] * 1.0 / all_device_mem;
+                        std::cout << model_ratio << std::endl;
+                        device_config[ov::query_model_uses_device_mem.name()] = model_ratio;
+                    } else {
+                        float model_ratio = device_mem_map[device_name] * 1.0 / (total_ops_size * 1.2);
+                        device_config[ov::query_model_uses_device_mem.name()] = model_ratio;
+                        std::cout << "the other device is CPU\n";
+                    }
                 }
                 auto device_item = device_mem_map.find(device_name);
                 device_mem_map.erase(device_item);
