@@ -135,8 +135,8 @@ std::pair<ov::SupportedOpsMap, ov::hetero::SubgraphsMappingInfo> ov::hetero::Plu
                 // Check if there is a device that can take the entire model
                 size_t all_device_mem = 0;
                 for (auto& devic_mem : device_mem_map) {
-                    if (devic_mem.second >= 1.2 * total_ops_size && !config_update_flag) {
-                        std::cout << device_name << " " << devic_mem.second << " " << 1.2 * total_ops_size << std::endl;
+                    if (devic_mem.second >= total_ops_size && !config_update_flag) {
+                        std::cout << device_name << " " << devic_mem.second << " " << total_ops_size << std::endl;
                         if (device_name == devic_mem.first) {
                             device_config[ov::query_model_uses_device_mem.name()] = 1.0f;
                         } else {
@@ -152,9 +152,12 @@ std::pair<ov::SupportedOpsMap, ov::hetero::SubgraphsMappingInfo> ov::hetero::Plu
                         std::cout << model_ratio << std::endl;
                         device_config[ov::query_model_uses_device_mem.name()] = model_ratio;
                     } else {
-                        float model_ratio = device_mem_map[device_name] * 1.0 / (total_ops_size * 1.2);
-                        device_config[ov::query_model_uses_device_mem.name()] = model_ratio;
                         std::cout << "the other device is CPU\n";
+                        float model_ratio = device_mem_map[device_name] * 1.0 / (total_ops_size * 1.2);
+                        if (total_ops_size < device_mem_map[device_name]) {
+                            model_ratio = 1.0f;
+                        }
+                        device_config[ov::query_model_uses_device_mem.name()] = model_ratio;
                     }
                 }
                 auto device_item = device_mem_map.find(device_name);
