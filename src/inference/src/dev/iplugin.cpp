@@ -107,7 +107,6 @@ std::unordered_set<std::string> ov::get_supported_nodes(
     transform(transformed_model);
     auto ops = transformed_model->get_ordered_ops();
 
-
     NameSet supported;
     NameSet unsupported;
 
@@ -134,6 +133,11 @@ std::unordered_set<std::string> ov::get_supported_nodes(
         supported.erase(name);
     }
 
+    auto copy_set = [](NameSet& source, NameSet& dest) {
+        dest.clear();
+        copy(source.begin(), source.end(), inserter(dest, dest.end()));
+    };
+
     auto get_output_node = [](const ov::Output<ov::Node>& output) -> NodePtr {
         return output.get_node_shared_ptr();
     };
@@ -159,6 +163,16 @@ std::unordered_set<std::string> ov::get_supported_nodes(
         auto users = node->get_users();
         for (auto& user : users) {
             if (supported.count(user->get_friendly_name())) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    auto has_users_unsupported = [&](const NameSet& supported, const NodePtr& node) -> bool {
+        auto users = node->get_users();
+        for (auto& user : users) {
+            if (!supported.count(user->get_friendly_name()) && !ov::is_type<ov::op::v0::Result>(user)) {
                 return true;
             }
         }
@@ -224,89 +238,142 @@ std::unordered_set<std::string> ov::get_supported_nodes(
             total_ops_size += const_byte_size;
         }
     }
-    std::map<std::string, int> pair_checker_temp;
-    // Walk over transformed model for special handing of Parameters/Constants/Results
-    for (auto&& op : ops) {
-        // Mark Constants and all fused names as unsupported if they are have no
-        // supported consumers/sources
-        if (ov::op::util::is_constant(op)) {
-            if (has_all_consumers_unsupported(supported, op)) {
-                remove_op_from_supported(op);
-                continue;
-            }
-        }
-        if (memory_control && supported.count(op->get_friendly_name())) {
-            if (const auto& assign = std::dynamic_pointer_cast<ov::op::util::VariableExtension>(op)) {
-                if (pair_checker_temp.count(assign->get_variable_id()) == 0) {
-                    pair_checker_temp[assign->get_variable_id()] = 1;
-                } else {
-                    pair_checker_temp[assign->get_variable_id()]++;
-                }
-            }
-            if (ov::op::util::is_constant(op) && !start_split) {
-                const auto const_byte_size = op->get_element_type().size() * shape_size(op->get_shape());
-                total_size += const_byte_size;
-                if (total_size >= memory_size_in_bytes * total_ops_size) {
-                    if (!start_split) {
-                        start_split = check_pairs(pair_checker_temp);
-                        // if (start_split) {
-                        //     if ((total_ops_size - total_size) / memory_size_in_bytes < 0.1) {
-                        //         break;
-                        //     }
-                        // }
-                    }
-                }
-            }
-            if (start_split) {
-                if (!ov::op::util::is_constant(op)) {
-                    if (!has_unsupported_source(supported, op, false)) {
-                        continue;
-                    }
+
+    NameSet temp_supported;
+    NameSet temp_unsupported;
+    NameSet temp_supported_1;
+    NameSet temp_unsupported_1;
+    copy_set(supported, temp_supported);
+    copy_set(unsupported, temp_unsupported);
+    std::set<std::string> split_vector;
+    uint32_t last_total_len = 0;
+    bool stop_split = false;
+    do {
+        std::map<std::string, int> pair_checker_temp;
+        start_split = false;
+        total_size = 0.0;
+        copy_set(temp_supported, supported);
+        copy_set(temp_unsupported, unsupported);
+
+        // Walk over transformed model for special handing of Parameters/Constants/Results
+        for (auto&& op : ops) {
+            // Mark Constants and all fused names as unsupported if they are have no
+            // supported consumers/sources
+            if (ov::op::util::is_constant(op)) {
+                if (has_all_consumers_unsupported(supported, op)) {
                     remove_op_from_supported(op);
-                    for (auto& input : op->inputs()) {
-                        const auto& node = get_input_node(input);
-                        if (ov::op::util::is_constant(node)) {
-                            remove_op_from_supported(node);
+                    continue;
+                }
+            }
+            if (memory_control && supported.count(op->get_friendly_name()) && !stop_split) {
+                if (const auto& assign = std::dynamic_pointer_cast<ov::op::util::VariableExtension>(op)) {
+                    if (pair_checker_temp.count(assign->get_variable_id()) == 0) {
+                        pair_checker_temp[assign->get_variable_id()] = 1;
+                    } else {
+                        pair_checker_temp[assign->get_variable_id()]++;
+                    }
+                }
+                if (ov::op::util::is_constant(op) && !start_split) {
+                    const auto const_byte_size = op->get_element_type().size() * shape_size(op->get_shape());
+                    total_size += const_byte_size;
+                    if (total_size >= memory_size_in_bytes * total_ops_size * 1.1) {
+                        stop_split = true;
+                        break;
+                    }
+                    if (total_size >= memory_size_in_bytes * total_ops_size * 0.9) {
+                        if (!start_split && split_vector.find(op->get_friendly_name()) == split_vector.end()) {
+                            start_split = check_pairs(pair_checker_temp);
+                            if (start_split) {
+                                split_vector.insert(op->get_friendly_name());
+                            }
                         }
+                    } 
+                }
+                if (start_split) {
+                    if (!ov::op::util::is_constant(op)) {
+                        // if (!has_unsupported_source(supported, op, false)) {
+                        //     std::cout << "has_unsupported_source: " << op->get_friendly_name() << std::endl;
+                        //     continue;
+                        // }
+                        remove_op_from_supported(op);
+                        for (auto& input : op->inputs()) {
+                            const auto& node = get_input_node(input);
+                            if (ov::op::util::is_constant(node)) {
+                                remove_op_from_supported(node);
+                            }
+                        }
+                    } else {
+                        remove_op_from_supported(op);
                     }
-                } else {
+                }
+            }
+        }
+
+        NameSet removed_nodes = get_removed_nodes(model, transformed_model);
+        // Filter ShapeOfs
+        for (auto& op : model->get_ordered_ops()) {
+            const auto& name = op->get_friendly_name();
+            if (ov::is_type<ov::op::util::ShapeOfBase>(op) && (supported.count(name) || removed_nodes.count(name))) {
+                if (has_all_consumers_unsupported(supported, op) && has_all_consumers_unsupported(removed_nodes, op)) {
                     remove_op_from_supported(op);
+                    removed_nodes.erase(name);
                 }
             }
         }
-    }
 
-    NameSet removed_nodes = get_removed_nodes(model, transformed_model);
-    // Filter ShapeOfs
-    for (auto& op : model->get_ordered_ops()) {
-        const auto& name = op->get_friendly_name();
-        if (ov::is_type<ov::op::util::ShapeOfBase>(op) && (supported.count(name) || removed_nodes.count(name))) {
-            if (has_all_consumers_unsupported(supported, op) && has_all_consumers_unsupported(removed_nodes, op)) {
-                remove_op_from_supported(op);
-                removed_nodes.erase(name);
-            }
+        if (!memory_control) {
+            // If memory control is off
+            // mark all removed nodes as supported
+            supported.insert(removed_nodes.begin(), removed_nodes.end());
         }
-    }
-
-    if (!memory_control) {
-        // If memory control is off
-        // mark all removed nodes as supported
-        supported.insert(removed_nodes.begin(), removed_nodes.end());
-    }
-    // In case some ops not in orederd
-    if (memory_control) {
-        bool changed = true;
-        while (changed) {
-            changed = false;
+        // In case some ops not in orederd
+        if (memory_control) {
+            bool changed = true;
+            while (changed) {
+                changed = false;
+                for (auto& op : model->get_ordered_ops()) {
+                    if (!supported.count(op->get_friendly_name()) && has_users_supported(supported, op) &&
+                        !unsupported.count(op->get_friendly_name())) {
+                        supported.insert(op->get_friendly_name());
+                        changed = true;
+                    }
+                }
+            }
+            uint64_t total_len = 0;
             for (auto& op : model->get_ordered_ops()) {
-                if (!supported.count(op->get_friendly_name()) && has_users_supported(supported, op) &&
-                    !unsupported.count(op->get_friendly_name())) {
-                    supported.insert(op->get_friendly_name());
-                    changed = true;
+                if (supported.count(op->get_friendly_name()) && !ov::op::util::is_constant(op) &&
+                    !ov::op::util::is_parameter(op)) {
+                    if (has_users_unsupported(supported, op)) {
+                        // std::cout << "has_users_unsupported: " << op->get_friendly_name() << std::endl;
+                        // std::cout << op->get_friendly_name() << " " << op->get_output_partial_shape(0) << std::endl;
+                        uint64_t op_size = 1;
+                        for (size_t z = 0; z < op->get_output_partial_shape(0).size(); z++) {
+                            try {
+                                uint32_t len = op->get_output_partial_shape(0)[z].get_length();
+                                if (len >= 1)
+                                    op_size *= len;
+                            } catch (...) {
+                            }
+                        }
+                        total_len += op_size;
+                    }
                 }
             }
+
+            // std::cout << "total_len: " << total_len << std::endl;
+            if ((total_len < last_total_len || last_total_len == 0) && !stop_split) {
+                last_total_len = total_len;
+                copy_set(supported, temp_supported_1);
+                copy_set(unsupported, temp_unsupported_1);
+            }
         }
+    } while(!stop_split && memory_control);
+    std::cout << "split_vector: " << split_vector.size() << " " << last_total_len << std::endl;
+    if (memory_control) {
+        copy_set(temp_supported_1, supported);
+        copy_set(temp_unsupported_1, unsupported);
     }
+
     // Finally get intersection of all supported operation names
     // and operation names from original model
     for (auto&& name : supported) {
