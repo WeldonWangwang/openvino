@@ -91,15 +91,65 @@ std::pair<ov::SupportedOpsMap, ov::hetero::SubgraphsMappingInfo> ov::hetero::Plu
 
     //  WARNING: Here is devices with user set priority
     auto device_names = ov::DeviceIDParser::get_hetero_devices(full_config.device_priorities);
+
+    // if set use hetero query with device_mem, modify the device properity
+    auto sort_by_mem = [&](std::string device_a, std::string device_b) {
+        size_t device_a_mem = 0;
+        size_t device_b_mem = 0;
+        try {
+            device_a_mem = get_core()->get_property(device_a, ov::intel_gpu::device_total_mem_size);
+            device_b_mem = get_core()->get_property(device_b, ov::intel_gpu::device_total_mem_size);
+        } catch (const ov::Exception&) {
+        }
+        return device_a_mem > device_b_mem;
+    };
+
+    std::vector<std::string> CPU;
+    std::vector<std::string> dGPU;
+    std::vector<std::string> iGPU;
+    std::vector<std::string> Others;
     std::map<std::string, size_t> device_mem_map;
     for (const auto& device_name : device_names) {
-        if (device_name.find("GPU") != std::string::npos) {
+        if (device_name.find("CPU") != std::string::npos) {
+            std::cout << "device_name " << device_name << std::endl;
+            CPU.emplace_back(device_name);
+        } else if (device_name.find("GPU") != std::string::npos) {
+            std::string device_type;
+            try {
+                device_type =
+                    get_core()->get_property(device_name, ov::device::type.name(), {}).as<std::string>();
+            } catch (const ov::Exception&) {
+                // std::cout << "get property :%s for %s failed ", "DEVICE_TYPE", device_name.c_str());
+            }
+            if (device_type == "integrated") {
+                iGPU.emplace_back(device_name);
+            } else if (device_type == "discrete") {
+                dGPU.emplace_back(device_name);
+            } else {
+                // LOG_DEBUG_TAG("Unknown device type for %s", device_name.c_str());
+                std::cout << "Unknown device type" << std::endl;
+            }
             try {
                 device_mem_map[device_name] = get_core()->get_property(device_name, ov::intel_gpu::device_total_mem_size);
             } catch (const ov::Exception&) {
             }
+        } else {
+            Others.emplace_back(device_name);
         }
     }
+    std::sort(dGPU.begin(), dGPU.end(), sort_by_mem);
+    std::sort(iGPU.begin(), iGPU.end(), sort_by_mem);
+    device_names.clear();
+    device_names.insert(device_names.end(), dGPU.begin(), dGPU.end());
+    device_names.insert(device_names.end(), iGPU.begin(), iGPU.end());
+    device_names.insert(device_names.end(), Others.begin(), Others.end());
+    device_names.insert(device_names.end(), CPU.begin(), CPU.end());
+
+    std::cout << "sort device_names: ";
+    for (const auto& device_name : device_names) {
+        std::cout << device_name << " ";
+    }
+    std::cout << std::endl;
 
     auto update_supported_ops = [](ov::SupportedOpsMap& final_results, const ov::SupportedOpsMap& device_results) {
         for (const auto& layer_query_result : device_results)
