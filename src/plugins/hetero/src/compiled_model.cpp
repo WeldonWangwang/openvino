@@ -115,6 +115,7 @@ void ov::hetero::CompiledModel::compile_model(const std::shared_ptr<ov::Model>& 
         m_compiled_submodels.resize(ordered_subgraphs.size());
         bool add_exclusive = ordered_subgraphs.size() > 1;
         size_t id = 0;
+        std::cout << "ordered_subgraphs: " << ordered_subgraphs.size() << std::endl;
         for (const auto& subgraph : ordered_subgraphs) {
             m_compiled_submodels[id].device = subgraph->get_affinity();
             m_compiled_submodels[id].model = subgraph->get_function();

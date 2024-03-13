@@ -93,22 +93,15 @@ std::pair<ov::SupportedOpsMap, ov::hetero::SubgraphsMappingInfo> ov::hetero::Plu
     auto device_names = ov::DeviceIDParser::get_hetero_devices(full_config.device_priorities);
 
     // if set use hetero query with device_mem, modify the device properity
-    auto sort_by_mem = [&](std::string device_a, std::string device_b) {
-        size_t device_a_mem = 0;
-        size_t device_b_mem = 0;
-        try {
-            device_a_mem = get_core()->get_property(device_a, ov::intel_gpu::device_total_mem_size);
-            device_b_mem = get_core()->get_property(device_b, ov::intel_gpu::device_total_mem_size);
-        } catch (const ov::Exception&) {
-        }
-        return device_a_mem > device_b_mem;
-    };
-
     std::vector<std::string> CPU;
     std::vector<std::string> dGPU;
     std::vector<std::string> iGPU;
     std::vector<std::string> Others;
     std::map<std::string, size_t> device_mem_map;
+    auto sort_by_mem = [&](std::string device_a, std::string device_b) {
+        return device_mem_map[device_a] > device_mem_map[device_b];
+    };
+
     for (const auto& device_name : device_names) {
         if (device_name.find("CPU") != std::string::npos) {
             std::cout << "device_name " << device_name << std::endl;
@@ -130,7 +123,9 @@ std::pair<ov::SupportedOpsMap, ov::hetero::SubgraphsMappingInfo> ov::hetero::Plu
                 std::cout << "Unknown device type" << std::endl;
             }
             try {
-                device_mem_map[device_name] = get_core()->get_property(device_name, ov::intel_gpu::device_total_mem_size);
+                size_t device_mem = get_core()->get_property(device_name, ov::intel_gpu::device_total_mem_size);
+                device_mem_map[device_name] = device_mem;
+                device_mem_map["all_left"] += device_mem;
             } catch (const ov::Exception&) {
             }
         } else {
@@ -170,7 +165,6 @@ std::pair<ov::SupportedOpsMap, ov::hetero::SubgraphsMappingInfo> ov::hetero::Plu
                             std::string device_name,
                             // std::map<std::string, size_t>& device_mem_map,
                             bool fallback_device) {
-        bool config_update_flag = false;
         auto supported_properties = get_core()->get_property(device_name, ov::supported_properties);
         if (ov::util::contains(supported_properties, ov::query_model_uses_device_mem)) {
             if (fallback_device) {
@@ -183,43 +177,24 @@ std::pair<ov::SupportedOpsMap, ov::hetero::SubgraphsMappingInfo> ov::hetero::Plu
                     }
                 }
                 // Check if there is a device that can take the entire model
-                size_t all_device_mem = 0;
-                for (auto& devic_mem : device_mem_map) {
-                    if (devic_mem.second >= 1.2 * total_ops_size && !config_update_flag) {
-                        std::cout << device_name << " " << devic_mem.second << " " << total_ops_size << std::endl;
-                        // if (devic_mem.second < 1.2 * total_ops_size) {
-                        //     std::cout << "!!!!!!!!!!!!!!!!!!!!!!\n";
-                        // }
-                        if (device_name == devic_mem.first) {
-                            device_config[ov::query_model_uses_device_mem.name()] = 1.0f;
-                        } else {
-                            device_config[ov::query_model_uses_device_mem.name()] = 0.0f;
-                        }
-                        config_update_flag = true;
+                if (device_mem_map[device_name] >= 1.2 * total_ops_size) {
+                    device_config[ov::query_model_uses_device_mem.name()] = 1.0f;
+                } else if (device_mem_map["all_left"] >= 1.2 * total_ops_size || device_mem_map["all_left"] == device_mem_map[device_name]) {
+                    // if device_mem_map["all_left"] == device_mem_map[device_name], the last device is CPU
+                    float model_ratio = device_mem_map[device_name] * 1.0 / (total_ops_size * 1.2);
+                    if (total_ops_size < device_mem_map[device_name]) {
+                        model_ratio = 1.0f;
                     }
-                    all_device_mem += devic_mem.second;
+                    device_config[ov::query_model_uses_device_mem.name()] = model_ratio;
+                } else {
+                    // device_mem_map["all_left"] < 1.2 * total_ops_size
+                    float model_ratio = device_mem_map[device_name] * 1.0 / device_mem_map["all_left"];
+                    std::cout << device_mem_map["all_left"] << " " << total_ops_size << std::endl;
+                    device_config[ov::query_model_uses_device_mem.name()] = model_ratio;
                 }
-                if (!config_update_flag) {
-                    if (device_mem_map[device_name] > total_ops_size) {
-                        std::cout << "!!!!!!!!!!!!!!!!!!!!!!\n";
-                    }
-
-                    if (device_mem_map.size() > 1) {
-                        float model_ratio = device_mem_map[device_name] * 1.0 / all_device_mem;
-                        std::cout << model_ratio << std::endl;
-                        std::cout << all_device_mem << " " << total_ops_size << std::endl;
-                        device_config[ov::query_model_uses_device_mem.name()] = model_ratio;
-                    } else {
-                        std::cout << "the other device is CPU\n";
-                        float model_ratio = device_mem_map[device_name] * 1.0 / (total_ops_size * 1.2);
-                        if (total_ops_size < device_mem_map[device_name]) {
-                            model_ratio = 1.0f;
-                        }
-                        device_config[ov::query_model_uses_device_mem.name()] = model_ratio;
-                    }
+                if (device_mem_map.find(device_name) != device_mem_map.end()) {
+                    device_mem_map["all_left"] -= device_mem_map[device_name];
                 }
-                auto device_item = device_mem_map.find(device_name);
-                device_mem_map.erase(device_item);
             }
             std::cout << device_name << " " << device_config[ov::query_model_uses_device_mem.name()].as<float>() << std::endl;
         } else {
