@@ -81,23 +81,12 @@ ov::hetero::Plugin::DeviceProperties ov::hetero::Plugin::get_properties_per_devi
     return device_properties;
 }
 
-std::pair<ov::SupportedOpsMap, ov::hetero::SubgraphsMappingInfo> ov::hetero::Plugin::query_model_update(
-    std::shared_ptr<ov::Model>& model,
-    const ov::AnyMap& properties,
-    bool allow_exception) const {
-    Configuration full_config{properties, m_cfg};
-    DeviceProperties properties_per_device =
-        get_properties_per_device(full_config.device_priorities, full_config.get_device_properties());
-
-    //  WARNING: Here is devices with user set priority
-    auto device_names = ov::DeviceIDParser::get_hetero_devices(full_config.device_priorities);
-
-    // if set use hetero query with device_mem, modify the device properity
+void ov::hetero::Plugin::update_device_priorities(std::vector<std::string>& device_names,
+                                                  std::map<std::string, size_t>& device_mem_map) const {
     std::vector<std::string> CPU;
     std::vector<std::string> dGPU;
     std::vector<std::string> iGPU;
     std::vector<std::string> Others;
-    std::map<std::string, size_t> device_mem_map;
     auto sort_by_mem = [&](std::string device_a, std::string device_b) {
         return device_mem_map[device_a] > device_mem_map[device_b];
     };
@@ -109,8 +98,7 @@ std::pair<ov::SupportedOpsMap, ov::hetero::SubgraphsMappingInfo> ov::hetero::Plu
         } else if (device_name.find("GPU") != std::string::npos) {
             std::string device_type;
             try {
-                device_type =
-                    get_core()->get_property(device_name, ov::device::type.name(), {}).as<std::string>();
+                device_type = get_core()->get_property(device_name, ov::device::type.name(), {}).as<std::string>();
             } catch (const ov::Exception&) {
                 // std::cout << "get property :%s for %s failed ", "DEVICE_TYPE", device_name.c_str());
             }
@@ -145,6 +133,23 @@ std::pair<ov::SupportedOpsMap, ov::hetero::SubgraphsMappingInfo> ov::hetero::Plu
         std::cout << device_name << " ";
     }
     std::cout << std::endl;
+}
+
+std::pair<ov::SupportedOpsMap, ov::hetero::SubgraphsMappingInfo> ov::hetero::Plugin::query_model_update(
+    std::shared_ptr<ov::Model>& model,
+    const ov::AnyMap& properties,
+    bool allow_exception) const {
+    std::map<std::string, size_t> device_mem_map;
+    Configuration full_config{properties, m_cfg};
+    DeviceProperties properties_per_device =
+        get_properties_per_device(full_config.device_priorities, full_config.get_device_properties());
+
+    //  WARNING: Here is devices with user set priority
+    auto device_names = ov::DeviceIDParser::get_hetero_devices(full_config.device_priorities);
+    std::cout << "hetero_query_model_by_device: " << full_config.hetero_query_model_by_device << std::endl;
+    if (full_config.hetero_query_model_by_device) {
+        update_device_priorities(device_names, device_mem_map);
+    }
 
     auto update_supported_ops = [](ov::SupportedOpsMap& final_results, const ov::SupportedOpsMap& device_results) {
         for (const auto& layer_query_result : device_results)
@@ -161,14 +166,13 @@ std::pair<ov::SupportedOpsMap, ov::hetero::SubgraphsMappingInfo> ov::hetero::Plu
     };
 
     auto update_config = [&](ov::AnyMap& device_config,
-                            const std::shared_ptr<const ov::Model>& model,
-                            std::string device_name,
-                            // std::map<std::string, size_t>& device_mem_map,
-                            bool fallback_device) {
+                             const std::shared_ptr<const ov::Model>& model,
+                             std::string device_name,
+                             bool fallback_device) {
         auto supported_properties = get_core()->get_property(device_name, ov::supported_properties);
-        if (ov::util::contains(supported_properties, ov::query_model_uses_device_mem)) {
+        if (ov::util::contains(supported_properties, ov::query_model_ratio)) {
             if (fallback_device) {
-                device_config[ov::query_model_uses_device_mem.name()] = 1.0f;
+                device_config[ov::query_model_ratio.name()] = 1.0f;
             } else {
                 double total_ops_size = 0;
                 for (auto&& op : model->get_ordered_ops()) {
@@ -178,27 +182,28 @@ std::pair<ov::SupportedOpsMap, ov::hetero::SubgraphsMappingInfo> ov::hetero::Plu
                 }
                 // Check if there is a device that can take the entire model
                 if (device_mem_map[device_name] >= 1.2 * total_ops_size) {
-                    device_config[ov::query_model_uses_device_mem.name()] = 1.0f;
-                } else if (device_mem_map["all_left"] >= 1.2 * total_ops_size || device_mem_map["all_left"] == device_mem_map[device_name]) {
+                    device_config[ov::query_model_ratio.name()] = 1.0f;
+                } else if (device_mem_map["all_left"] >= 1.2 * total_ops_size ||
+                           device_mem_map["all_left"] == device_mem_map[device_name]) {
                     // if device_mem_map["all_left"] == device_mem_map[device_name], the last device is CPU
                     float model_ratio = device_mem_map[device_name] * 1.0 / (total_ops_size * 1.2);
                     if (total_ops_size < device_mem_map[device_name]) {
                         model_ratio = 1.0f;
                     }
-                    device_config[ov::query_model_uses_device_mem.name()] = model_ratio;
+                    device_config[ov::query_model_ratio.name()] = model_ratio;
                 } else {
                     // device_mem_map["all_left"] < 1.2 * total_ops_size
                     float model_ratio = device_mem_map[device_name] * 1.0 / device_mem_map["all_left"];
                     std::cout << device_mem_map["all_left"] << " " << total_ops_size << std::endl;
-                    device_config[ov::query_model_uses_device_mem.name()] = model_ratio;
+                    device_config[ov::query_model_ratio.name()] = model_ratio;
                 }
                 if (device_mem_map.find(device_name) != device_mem_map.end()) {
                     device_mem_map["all_left"] -= device_mem_map[device_name];
                 }
             }
-            std::cout << device_name << " " << device_config[ov::query_model_uses_device_mem.name()].as<float>() << std::endl;
+            std::cout << device_name << " " << device_config[ov::query_model_ratio.name()].as<float>() << std::endl;
         } else {
-            std::cout << device_name << " do not changed query_model_uses_device_mem\n";
+            std::cout << device_name << " do not changed query_model_ratio\n";
         }
     };
 
@@ -223,7 +228,8 @@ std::pair<ov::SupportedOpsMap, ov::hetero::SubgraphsMappingInfo> ov::hetero::Plu
         const auto& default_device = (!allow_exception || !fallback_device) ? get_device_name() : "";
         auto& device_config = properties_per_device.at(device_name);
         if (!has_subgraph_ops(model)) {
-            update_config(device_config, model, device_name, fallback_device);
+            if (full_config.hetero_query_model_by_device)
+                update_config(device_config, model, device_name, fallback_device);
             query_results[device_name] = get_core()->query_model(model, device_name, device_config);
             update_supported_ops(supported_ops_temp, query_results[device_name]);
             update_supported_ops(supported_ops_final, query_results[device_name]);
@@ -243,7 +249,8 @@ std::pair<ov::SupportedOpsMap, ov::hetero::SubgraphsMappingInfo> ov::hetero::Plu
             for (const auto& op : temp_model->get_ordered_ops()) {
                 if (const auto& subgraph = ov::as_type_ptr<ov::hetero::op::DeviceSubgraph>(op)) {
                     if (subgraph->get_affinity() == "HETERO-TEMP") {
-                        update_config(device_config, subgraph->get_function(), device_name, fallback_device);
+                        if (full_config.hetero_query_model_by_device)
+                            update_config(device_config, subgraph->get_function(), device_name, fallback_device);
                         query_results[device_name] =
                             get_core()->query_model(subgraph->get_function(), device_name, device_config);
                         update_supported_ops(supported_ops_temp, query_results[device_name]);
@@ -283,7 +290,8 @@ ov::Any ov::hetero::Plugin::get_property(const std::string& name, const ov::AnyM
         return ro_properties;
     };
     const auto& default_rw_properties = []() {
-        std::vector<ov::PropertyName> rw_properties{ov::device::priorities};
+        std::vector<ov::PropertyName> rw_properties{ov::device::priorities,
+                                                    ov::hetero::hetero_query_model_by_device};
         return rw_properties;
     };
 

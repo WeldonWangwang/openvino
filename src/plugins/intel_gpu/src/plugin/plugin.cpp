@@ -257,7 +257,8 @@ ov::SupportedOpsMap Plugin::query_model(const std::shared_ptr<const ov::Model>& 
 
     ProgramBuilder prog(ctx->get_engine(), config);
 
-    float ratio = config.get_property(ov::query_model_uses_device_mem.name()).as<float>();
+    float ratio = config.get_property(ov::query_model_ratio.name()).as<float>();
+    std::cout << "ratio: " << ratio << std::endl;
     // uint64_t memory_size_in_bytes = use_memory ? ctx->get_engine().get_device_info().max_global_mem_size : 0;
 
     auto supported = ov::get_supported_nodes(model,
@@ -556,7 +557,7 @@ std::vector<ov::PropertyName> Plugin::get_supported_properties() const {
         ov::PropertyName{ov::hint::inference_precision.name(), PropertyMutability::RW},
         ov::PropertyName{ov::hint::enable_cpu_pinning.name(), PropertyMutability::RW},
         ov::PropertyName{ov::device::id.name(), PropertyMutability::RW},
-        ov::PropertyName{ov::query_model_uses_device_mem.name(), PropertyMutability::RW},
+        ov::PropertyName{ov::query_model_ratio.name(), PropertyMutability::RW},
     };
 
     return supported_properties;
