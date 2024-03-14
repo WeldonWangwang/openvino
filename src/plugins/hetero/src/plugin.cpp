@@ -290,8 +290,7 @@ ov::Any ov::hetero::Plugin::get_property(const std::string& name, const ov::AnyM
         return ro_properties;
     };
     const auto& default_rw_properties = []() {
-        std::vector<ov::PropertyName> rw_properties{ov::device::priorities,
-                                                    ov::hetero::hetero_query_model_by_device};
+        std::vector<ov::PropertyName> rw_properties{ov::device::priorities, ov::hetero::hetero_query_model_by_device};
         return rw_properties;
     };
 

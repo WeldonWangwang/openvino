@@ -296,7 +296,7 @@ std::unordered_set<std::string> ov::get_supported_nodes(
                     }
                 }
                 if (ready_split) {
-                    if(ov::op::util::is_constant(op)) {
+                    if (ov::op::util::is_constant(op)) {
                         remove_op_from_supported(op);
                         start_split = true;
                     } else if (start_split) {
@@ -306,7 +306,7 @@ std::unordered_set<std::string> ov::get_supported_nodes(
                             if (ov::op::util::is_constant(node)) {
                                 remove_op_from_supported(node);
                             }
-                        } 
+                        }
                     }
                 }
             }

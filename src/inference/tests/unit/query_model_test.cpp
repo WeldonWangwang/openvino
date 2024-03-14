@@ -536,15 +536,9 @@ TEST_P(GetSupportedNodesStatefulTest, SplitModelTest) {
         const_value2->set_friendly_name("const_val2");
         auto add2 = std::make_shared<ov::op::v1::Add>(add1, const_value2);
         add2->set_friendly_name("add2");
-
-        auto reshape_val = ov::op::v0::Constant::create(ov::element::i64, ov::Shape{1}, {-1});
-        reshape_val->set_friendly_name("reshape_val");
-        auto reshape = std::make_shared<ov::op::v1::Reshape>(add2, reshape_val, true);
-        reshape->set_friendly_name("reshape");
-        auto result = std::make_shared<ov::op::v0::Result>(reshape);
+        auto result = std::make_shared<ov::op::v0::Result>(add2);
         result->set_friendly_name("res");
-        m_model =
-            std::make_shared<ov::Model>(ov::ResultVector{result}, ov::ParameterVector{param});
+        m_model = std::make_shared<ov::Model>(ov::ResultVector{result}, ov::ParameterVector{param});
     }
     float query_model_ratio;
     std::unordered_set<std::string> expected;
@@ -566,8 +560,8 @@ TEST_P(GetSupportedNodesStatefulTest, SplitModelTest) {
 }
 
 const std::vector<ConfigParams> testConfigs = {
-    // ConfigParams{0.0f, std::unordered_set<std::string>{}},
+    ConfigParams{0.0f, std::unordered_set<std::string>{}},
     ConfigParams{0.5f, std::unordered_set<std::string>{"input", "const_val1", "add1"}},
-    ConfigParams{1.0f, std::unordered_set<std::string>{"input", "const_val1", "add1", "const_val2", "add2", "reshape_val", "reshape", "res"}}};
+    ConfigParams{1.0f, std::unordered_set<std::string>{"input", "const_val1", "add1", "const_val2", "add2", "res"}}};
 
 INSTANTIATE_TEST_SUITE_P(GetSupportedNodesTest, GetSupportedNodesStatefulTest, ::testing::ValuesIn(testConfigs));
