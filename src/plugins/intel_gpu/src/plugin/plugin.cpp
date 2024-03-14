@@ -257,8 +257,8 @@ ov::SupportedOpsMap Plugin::query_model(const std::shared_ptr<const ov::Model>& 
 
     ProgramBuilder prog(ctx->get_engine(), config);
 
-    float ratio = config.get_property(ov::query_model_ratio.name()).as<float>();
-    std::cout << "ratio: " << ratio << std::endl;
+    float query_model_ratio = config.get_property(ov::query_model_ratio.name()).as<float>();
+    std::cout << "ratio: " << query_model_ratio << std::endl;
     // uint64_t memory_size_in_bytes = use_memory ? ctx->get_engine().get_device_info().max_global_mem_size : 0;
 
     auto supported = ov::get_supported_nodes(model,
@@ -270,7 +270,7 @@ ov::SupportedOpsMap Plugin::query_model(const std::shared_ptr<const ov::Model>& 
         [&prog](std::shared_ptr<ov::Node> node) {
             return prog.is_op_supported(node);
         },
-        ratio);
+        query_model_ratio);
 
     for (auto&& op_name : supported) {
         res.emplace(op_name, ctx->get_device_name());

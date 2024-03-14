@@ -83,16 +83,15 @@ std::unordered_set<std::string> ov::get_supported_nodes(
     const std::shared_ptr<const ov::Model>& model,
     std::function<void(std::shared_ptr<ov::Model>&)> transform,
     std::function<bool(const std::shared_ptr<ov::Node>)> is_node_supported,
-    float memory_size_in_bytes) {
-    // Collect original operation names
-    std::cout << "memory_size_in_bytes: " << memory_size_in_bytes << std::endl;
+    float query_model_ratio) {
     using NameSet = std::unordered_set<std::string>;
     using NodePtr = std::shared_ptr<ov::Node>;
     NameSet res;
-    if (memory_size_in_bytes == 0) {
+    if (query_model_ratio == 0) {
         return res;
     }
-    bool memory_control = memory_size_in_bytes < 1;
+    bool query_by_memory_control = query_model_ratio < 1;
+    // Collect original operation names
     std::unordered_set<std::string> original_ops;
     for (auto&& node : model->get_ops()) {
         original_ops.emplace(node->get_friendly_name());
@@ -230,30 +229,32 @@ std::unordered_set<std::string> ov::get_supported_nodes(
     }
 
     bool start_split = false;
-    double total_size = 0.0;
     double total_ops_size = 0;
+    NameSet temp_supported;
+    NameSet temp_unsupported;
+    NameSet temp_supported_1;
+    NameSet temp_unsupported_1;
+    std::set<std::string> split_node_set;
+    uint32_t last_total_len = 0;
+    bool stop_split = false;
     for (auto&& op : ops) {
         if (ov::op::util::is_constant(op)) {
             const auto const_byte_size = op->get_element_type().size() * shape_size(op->get_shape());
             total_ops_size += const_byte_size;
         }
     }
-
-    NameSet temp_supported;
-    NameSet temp_unsupported;
-    NameSet temp_supported_1;
-    NameSet temp_unsupported_1;
-    copy_set(supported, temp_supported);
-    copy_set(unsupported, temp_unsupported);
-    std::set<std::string> split_vector;
-    uint32_t last_total_len = 0;
-    bool stop_split = false;
+    if (query_by_memory_control) {
+        copy_set(supported, temp_supported);
+        copy_set(unsupported, temp_unsupported);
+    }
     do {
         std::map<std::string, int> pair_checker_temp;
         start_split = false;
-        total_size = 0.0;
-        copy_set(temp_supported, supported);
-        copy_set(temp_unsupported, unsupported);
+        double total_size = 0.0;
+        if (query_by_memory_control) {
+            copy_set(temp_supported, supported);
+            copy_set(temp_unsupported, unsupported);
+        }
 
         // Walk over transformed model for special handing of Parameters/Constants/Results
         for (auto&& op : ops) {
@@ -265,7 +266,7 @@ std::unordered_set<std::string> ov::get_supported_nodes(
                     continue;
                 }
             }
-            if (memory_control && supported.count(op->get_friendly_name()) && !stop_split) {
+            if (query_by_memory_control && supported.count(op->get_friendly_name()) && !stop_split) {
                 if (const auto& assign = std::dynamic_pointer_cast<ov::op::util::VariableExtension>(op)) {
                     if (pair_checker_temp.count(assign->get_variable_id()) == 0) {
                         pair_checker_temp[assign->get_variable_id()] = 1;
@@ -276,18 +277,18 @@ std::unordered_set<std::string> ov::get_supported_nodes(
                 if (ov::op::util::is_constant(op) && !start_split) {
                     const auto const_byte_size = op->get_element_type().size() * shape_size(op->get_shape());
                     total_size += const_byte_size;
-                    if (total_size >= memory_size_in_bytes * total_ops_size * 1.1) {
+                    if (total_size >= query_model_ratio * total_ops_size * 1.1) {
                         stop_split = true;
                         break;
                     }
-                    if (total_size >= memory_size_in_bytes * total_ops_size * 0.9) {
-                        if (!start_split && split_vector.find(op->get_friendly_name()) == split_vector.end()) {
+                    if (total_size >= query_model_ratio * total_ops_size * 0.9) {
+                        if (!start_split && split_node_set.find(op->get_friendly_name()) == split_node_set.end()) {
                             start_split = check_pairs(pair_checker_temp);
                             if (start_split) {
-                                split_vector.insert(op->get_friendly_name());
+                                split_node_set.insert(op->get_friendly_name());
                             }
                         }
-                    } 
+                    }
                 }
                 if (start_split) {
                     if (!ov::op::util::is_constant(op)) {
@@ -321,13 +322,13 @@ std::unordered_set<std::string> ov::get_supported_nodes(
             }
         }
 
-        if (!memory_control) {
+        if (!query_by_memory_control) {
             // If memory control is off
             // mark all removed nodes as supported
             supported.insert(removed_nodes.begin(), removed_nodes.end());
         }
         // In case some ops not in orederd
-        if (memory_control) {
+        if (query_by_memory_control) {
             bool changed = true;
             while (changed) {
                 changed = false;
@@ -339,17 +340,15 @@ std::unordered_set<std::string> ov::get_supported_nodes(
                     }
                 }
             }
-            uint64_t total_len = 0;
+            int64_t total_len = 0;
             for (auto& op : model->get_ordered_ops()) {
                 if (supported.count(op->get_friendly_name()) && !ov::op::util::is_constant(op) &&
                     !ov::op::util::is_parameter(op)) {
                     if (has_users_unsupported(supported, op)) {
-                        // std::cout << "has_users_unsupported: " << op->get_friendly_name() << std::endl;
-                        // std::cout << op->get_friendly_name() << " " << op->get_output_partial_shape(0) << std::endl;
-                        uint64_t op_size = 1;
-                        for (size_t z = 0; z < op->get_output_partial_shape(0).size(); z++) {
+                        int64_t op_size = 1;
+                        for (size_t shape_id = 0; shape_id < op->get_output_partial_shape(0).size(); shape_id++) {
                             try {
-                                uint32_t len = op->get_output_partial_shape(0)[z].get_length();
+                                int64_t len = op->get_output_partial_shape(0)[shape_id].get_length();
                                 if (len >= 1)
                                     op_size *= len;
                             } catch (...) {
@@ -359,17 +358,14 @@ std::unordered_set<std::string> ov::get_supported_nodes(
                     }
                 }
             }
-
-            // std::cout << "total_len: " << total_len << std::endl;
             if ((total_len < last_total_len || last_total_len == 0) && !stop_split) {
                 last_total_len = total_len;
                 copy_set(supported, temp_supported_1);
                 copy_set(unsupported, temp_unsupported_1);
             }
         }
-    } while(!stop_split && memory_control);
-    std::cout << "split_vector: " << split_vector.size() << " " << last_total_len << std::endl;
-    if (memory_control) {
+    } while (!stop_split && query_by_memory_control);
+    if (query_by_memory_control) {
         copy_set(temp_supported_1, supported);
         copy_set(temp_unsupported_1, unsupported);
     }
