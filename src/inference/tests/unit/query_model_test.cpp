@@ -28,6 +28,8 @@
 #include "transformations/rt_info/decompression.hpp"
 #include "transformations/rt_info/fused_names_attribute.hpp"
 
+using ConfigParams = std::tuple<float, std::unordered_set<std::string>>;
+
 std::ostream& operator<<(std::ostream& os, const std::unordered_set<std::string>& s);
 
 std::ostream& operator<<(std::ostream& os, const std::unordered_set<std::string>& s) {
@@ -41,7 +43,7 @@ std::ostream& operator<<(std::ostream& os, const std::unordered_set<std::string>
     return os;
 }
 
-class GetSupportedNodesTest : public ::testing::Test {
+class GetSupportedNodesTest : public ::testing::TestWithParam<ConfigParams> {
 protected:
     ov::Shape m_shape{1, 84};
     std::shared_ptr<ov::Model> m_model;
@@ -50,8 +52,8 @@ public:
     void Run(std::function<void(std::shared_ptr<ov::Model>&)> transform,
              std::function<bool(const std::shared_ptr<ov::Node>)> is_node_supported,
              const std::unordered_set<std::string>& expected,
-             uint64_t memory_size_in_bytes = 0) {
-        auto supported = ov::get_supported_nodes(m_model, transform, is_node_supported, memory_size_in_bytes);
+             float query_model_ratio = 1.0f) {
+        auto supported = ov::get_supported_nodes(m_model, transform, is_node_supported, query_model_ratio);
         auto const is_in_expected = [&expected](const std::string& x) {
             return expected.find(x) != expected.end();
         };
@@ -518,3 +520,54 @@ TEST_F(GetSupportedNodesTest, AssignReadValueTest) {
         },
         {});
 }
+
+using GetSupportedNodesStatefulTest = GetSupportedNodesTest;
+
+TEST_P(GetSupportedNodesStatefulTest, SplitModelTest) {
+    {
+        auto param = std::make_shared<ov::op::v0::Parameter>(ov::element::f32, ov::PartialShape{1, 3, 2, 2});
+        param->set_friendly_name("input");
+        auto const_value1 = ov::op::v0::Constant::create(ov::element::f32, ov::Shape{1, 3, 2, 2}, {1});
+        const_value1->set_friendly_name("const_val1");
+        auto add1 = std::make_shared<ov::op::v1::Add>(param, const_value1);
+        add1->set_friendly_name("add1");
+
+        auto const_value2 = ov::op::v0::Constant::create(ov::element::f32, ov::Shape{1, 3, 2, 2}, {1});
+        const_value2->set_friendly_name("const_val2");
+        auto add2 = std::make_shared<ov::op::v1::Add>(add1, const_value2);
+        add2->set_friendly_name("add2");
+
+        auto reshape_val = ov::op::v0::Constant::create(ov::element::i64, ov::Shape{1}, {-1});
+        reshape_val->set_friendly_name("reshape_val");
+        auto reshape = std::make_shared<ov::op::v1::Reshape>(add2, reshape_val, true);
+        reshape->set_friendly_name("reshape");
+        auto result = std::make_shared<ov::op::v0::Result>(reshape);
+        result->set_friendly_name("res");
+        m_model =
+            std::make_shared<ov::Model>(ov::ResultVector{result}, ov::ParameterVector{param});
+    }
+    float query_model_ratio;
+    std::unordered_set<std::string> expected;
+
+    std::tie(query_model_ratio, expected) = this->GetParam();
+    Run(
+        [&](std::shared_ptr<ov::Model>& model) {
+            ov::pass::Manager m;
+            m.register_pass<ov::pass::InitNodeInfo>();
+            m.run_passes(model);
+        },
+        [&](const std::shared_ptr<ov::Node>& op) {
+            // Assign is supported, but ReadValue is not
+            return ov::op::util::is_parameter(op) || ov::op::util::is_output(op) || ov::op::util::is_constant(op) ||
+                   ov::is_type<ov::op::v1::Add>(op) || ov::is_type<ov::op::v1::Reshape>(op);
+        },
+        expected,
+        query_model_ratio);
+}
+
+const std::vector<ConfigParams> testConfigs = {
+    // ConfigParams{0.0f, std::unordered_set<std::string>{}},
+    ConfigParams{0.5f, std::unordered_set<std::string>{"input", "const_val1", "add1"}},
+    ConfigParams{1.0f, std::unordered_set<std::string>{"input", "const_val1", "add1", "const_val2", "add2", "reshape_val", "reshape", "res"}}};
+
+INSTANTIATE_TEST_SUITE_P(GetSupportedNodesTest, GetSupportedNodesStatefulTest, ::testing::ValuesIn(testConfigs));

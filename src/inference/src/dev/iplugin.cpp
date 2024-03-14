@@ -228,7 +228,8 @@ std::unordered_set<std::string> ov::get_supported_nodes(
         }
     }
 
-    bool start_split = false;
+    // bool start_split = false;
+    // bool ready_split = false;
     double total_ops_size = 0;
     NameSet temp_supported;
     NameSet temp_unsupported;
@@ -243,13 +244,16 @@ std::unordered_set<std::string> ov::get_supported_nodes(
             total_ops_size += const_byte_size;
         }
     }
+    std::cout << "total_ops_size: " << total_ops_size << std::endl;
+    std::cout << "query_model_ratio: " << query_model_ratio << std::endl;
     if (query_by_memory_control) {
         copy_set(supported, temp_supported);
         copy_set(unsupported, temp_unsupported);
     }
     do {
         std::map<std::string, int> pair_checker_temp;
-        start_split = false;
+        bool ready_split = false;
+        bool start_split = false;
         double total_size = 0.0;
         if (query_by_memory_control) {
             copy_set(temp_supported, supported);
@@ -274,7 +278,7 @@ std::unordered_set<std::string> ov::get_supported_nodes(
                         pair_checker_temp[assign->get_variable_id()]++;
                     }
                 }
-                if (ov::op::util::is_constant(op) && !start_split) {
+                if (ov::op::util::is_constant(op) && !ready_split) {
                     const auto const_byte_size = op->get_element_type().size() * shape_size(op->get_shape());
                     total_size += const_byte_size;
                     if (total_size >= query_model_ratio * total_ops_size * 1.1) {
@@ -282,29 +286,27 @@ std::unordered_set<std::string> ov::get_supported_nodes(
                         break;
                     }
                     if (total_size >= query_model_ratio * total_ops_size * 0.9) {
-                        if (!start_split && split_node_set.find(op->get_friendly_name()) == split_node_set.end()) {
-                            start_split = check_pairs(pair_checker_temp);
-                            if (start_split) {
+                        if (!ready_split && split_node_set.find(op->get_friendly_name()) == split_node_set.end()) {
+                            ready_split = check_pairs(pair_checker_temp);
+                            if (ready_split) {
                                 split_node_set.insert(op->get_friendly_name());
+                                continue;
                             }
                         }
                     }
                 }
-                if (start_split) {
-                    if (!ov::op::util::is_constant(op)) {
-                        // if (!has_unsupported_source(supported, op, false)) {
-                        //     std::cout << "has_unsupported_source: " << op->get_friendly_name() << std::endl;
-                        //     continue;
-                        // }
+                if (ready_split) {
+                    if(ov::op::util::is_constant(op)) {
+                        remove_op_from_supported(op);
+                        start_split = true;
+                    } else if (start_split) {
                         remove_op_from_supported(op);
                         for (auto& input : op->inputs()) {
                             const auto& node = get_input_node(input);
                             if (ov::op::util::is_constant(node)) {
                                 remove_op_from_supported(node);
                             }
-                        }
-                    } else {
-                        remove_op_from_supported(op);
+                        } 
                     }
                 }
             }
@@ -369,6 +371,7 @@ std::unordered_set<std::string> ov::get_supported_nodes(
         copy_set(temp_supported_1, supported);
         copy_set(temp_unsupported_1, unsupported);
     }
+    std::cout << "last_total_len: " << last_total_len << " " << split_node_set.size() << std::endl;
 
     // Finally get intersection of all supported operation names
     // and operation names from original model
