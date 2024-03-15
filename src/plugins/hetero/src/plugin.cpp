@@ -180,6 +180,7 @@ std::pair<ov::SupportedOpsMap, ov::hetero::SubgraphsMappingInfo> ov::hetero::Plu
                         total_ops_size += op->get_element_type().size() * shape_size(op->get_shape());
                     }
                 }
+                std::cout << "total_ops_size: " << total_ops_size << std::endl;
                 // Check if there is a device that can take the entire model
                 if (device_mem_map[device_name] >= 1.2 * total_ops_size) {
                     device_config[ov::query_model_ratio.name()] = 1.0f;
@@ -236,7 +237,7 @@ std::pair<ov::SupportedOpsMap, ov::hetero::SubgraphsMappingInfo> ov::hetero::Plu
 
             mapping_info = ov::hetero::mask_model_subgraphs_by_ops(model,
                                                                    supported_ops_temp,
-                                                                   m_cfg.dump_dot_files(),
+                                                                   true,
                                                                    default_device);
         } else {
             auto temp_model = model->clone();
@@ -260,7 +261,7 @@ std::pair<ov::SupportedOpsMap, ov::hetero::SubgraphsMappingInfo> ov::hetero::Plu
             }
             mapping_info = ov::hetero::mask_model_subgraphs_by_ops(model,
                                                                    supported_ops_temp,
-                                                                   m_cfg.dump_dot_files(),
+                                                                   true,
                                                                    default_device);
         }
     }

@@ -204,6 +204,18 @@ std::unordered_set<std::string> ov::get_supported_nodes(
         });
     };
 
+    auto filter_shapeOf = [&](NameSet& supported, NameSet& removed_nodes) {
+        for (auto& op : model->get_ordered_ops()) {
+            const auto& name = op->get_friendly_name();
+            if (ov::is_type<ov::op::util::ShapeOfBase>(op) && (supported.count(name) || removed_nodes.count(name))) {
+                if (has_all_consumers_unsupported(supported, op) && has_all_consumers_unsupported(removed_nodes, op)) {
+                    remove_op_from_supported(op);
+                    removed_nodes.erase(name);
+                }
+            }
+        }
+    };
+
     // Check the ops to make sure Assign and ReadValue operations in pairs on the network
     std::map<std::string, int> pair_checker;
     for (auto&& op : ops) {
@@ -227,110 +239,96 @@ std::unordered_set<std::string> ov::get_supported_nodes(
             }
         }
     }
+    for (auto&& op : ops) {
+        // Mark Constants and all fused names as unsupported if they are have no
+        // supported consumers/sources
+        if (ov::op::util::is_constant(op)) {
+            if (has_all_consumers_unsupported(supported, op)) {
+                remove_op_from_supported(op);
+                continue;
+            }
+        }
+    }
 
-    // bool start_split = false;
-    // bool ready_split = false;
-    double total_ops_size = 0;
-    NameSet temp_supported;
-    NameSet temp_unsupported;
-    NameSet temp_supported_1;
-    NameSet temp_unsupported_1;
-    std::set<std::string> split_node_set;
-    uint32_t last_total_len = 0;
-    bool stop_split = false;
+    NameSet removed_nodes = get_removed_nodes(model, transformed_model);
+    unsigned long total_ops_size = 0;
     for (auto&& op : ops) {
         if (ov::op::util::is_constant(op)) {
             const auto const_byte_size = op->get_element_type().size() * shape_size(op->get_shape());
             total_ops_size += const_byte_size;
         }
     }
-    std::cout << "total_ops_size: " << total_ops_size << std::endl;
-    std::cout << "query_model_ratio: " << query_model_ratio << std::endl;
+    if (total_ops_size == 0 || supported.size() == 0) {
+        query_by_memory_control = false;
+    }
     if (query_by_memory_control) {
+        NameSet temp_supported;
+        NameSet temp_unsupported;
+        NameSet temp_supported_1;
+        NameSet temp_unsupported_1;
+        std::set<std::string> split_node_set;
+        uint32_t last_total_len = 0;
+        bool stop_split = false;
+        double last_total_size = 0.0;
+        std::cout << "total_ops_size: " << total_ops_size << std::endl;
+        std::cout << "query_model_ratio: " << query_model_ratio << std::endl;
         copy_set(supported, temp_supported);
         copy_set(unsupported, temp_unsupported);
-    }
-    do {
-        std::map<std::string, int> pair_checker_temp;
-        bool ready_split = false;
-        bool start_split = false;
-        double total_size = 0.0;
-        if (query_by_memory_control) {
+        do {
+            std::map<std::string, int> pair_checker_temp;
+            bool ready_split = false;
+            bool start_split = false;
+            double total_size = 0.0;
             copy_set(temp_supported, supported);
             copy_set(temp_unsupported, unsupported);
-        }
-
-        // Walk over transformed model for special handing of Parameters/Constants/Results
-        for (auto&& op : ops) {
-            // Mark Constants and all fused names as unsupported if they are have no
-            // supported consumers/sources
-            if (ov::op::util::is_constant(op)) {
-                if (has_all_consumers_unsupported(supported, op)) {
-                    remove_op_from_supported(op);
-                    continue;
-                }
-            }
-            if (query_by_memory_control && supported.count(op->get_friendly_name()) && !stop_split) {
-                if (const auto& assign = std::dynamic_pointer_cast<ov::op::util::VariableExtension>(op)) {
-                    if (pair_checker_temp.count(assign->get_variable_id()) == 0) {
-                        pair_checker_temp[assign->get_variable_id()] = 1;
-                    } else {
-                        pair_checker_temp[assign->get_variable_id()]++;
+            // Walk over transformed model for special handing of Parameters/Constants/Results
+            for (auto&& op : ops) {
+                if (supported.count(op->get_friendly_name()) && !stop_split) {
+                    if (const auto& assign = std::dynamic_pointer_cast<ov::op::util::VariableExtension>(op)) {
+                        if (pair_checker_temp.count(assign->get_variable_id()) == 0) {
+                            pair_checker_temp[assign->get_variable_id()] = 1;
+                        } else {
+                            pair_checker_temp[assign->get_variable_id()]++;
+                        }
                     }
-                }
-                if (ov::op::util::is_constant(op) && !ready_split) {
-                    const auto const_byte_size = op->get_element_type().size() * shape_size(op->get_shape());
-                    total_size += const_byte_size;
-                    if (total_size >= query_model_ratio * total_ops_size * 1.1) {
-                        stop_split = true;
-                        break;
-                    }
-                    if (total_size >= query_model_ratio * total_ops_size * 0.9) {
-                        if (!ready_split && split_node_set.find(op->get_friendly_name()) == split_node_set.end()) {
-                            ready_split = check_pairs(pair_checker_temp);
-                            if (ready_split) {
-                                split_node_set.insert(op->get_friendly_name());
-                                continue;
+                    if (ov::op::util::is_constant(op) && !ready_split) {
+                        const auto const_byte_size = op->get_element_type().size() * shape_size(op->get_shape());
+                        total_size += const_byte_size;
+                        if (total_size >= query_model_ratio * total_ops_size * 1.05) {
+                            std::cout << "total_size: " << total_size << std::endl;
+                            stop_split = true;
+                            break;
+                        }
+                        if (total_size >= query_model_ratio * total_ops_size * 0.95) {
+                            if (!ready_split && split_node_set.find(op->get_friendly_name()) == split_node_set.end()) {
+                                ready_split = check_pairs(pair_checker_temp);
+                                if (ready_split) {
+                                    std::cout << "total_size: " << total_size << std::endl;
+                                    split_node_set.insert(op->get_friendly_name());
+                                    continue;
+                                }
                             }
                         }
                     }
-                }
-                if (ready_split) {
-                    if (ov::op::util::is_constant(op)) {
-                        remove_op_from_supported(op);
-                        start_split = true;
-                    } else if (start_split) {
-                        remove_op_from_supported(op);
-                        for (auto& input : op->inputs()) {
-                            const auto& node = get_input_node(input);
-                            if (ov::op::util::is_constant(node)) {
-                                remove_op_from_supported(node);
+                    if (ready_split) {
+                        if (ov::op::util::is_constant(op)) {
+                            remove_op_from_supported(op);
+                            start_split = true;
+                        } else if (start_split) {
+                            remove_op_from_supported(op);
+                            for (auto& input : op->inputs()) {
+                                const auto& node = get_input_node(input);
+                                if (ov::op::util::is_constant(node)) {
+                                    remove_op_from_supported(node);
+                                }
                             }
                         }
                     }
                 }
             }
-        }
-
-        NameSet removed_nodes = get_removed_nodes(model, transformed_model);
-        // Filter ShapeOfs
-        for (auto& op : model->get_ordered_ops()) {
-            const auto& name = op->get_friendly_name();
-            if (ov::is_type<ov::op::util::ShapeOfBase>(op) && (supported.count(name) || removed_nodes.count(name))) {
-                if (has_all_consumers_unsupported(supported, op) && has_all_consumers_unsupported(removed_nodes, op)) {
-                    remove_op_from_supported(op);
-                    removed_nodes.erase(name);
-                }
-            }
-        }
-
-        if (!query_by_memory_control) {
-            // If memory control is off
-            // mark all removed nodes as supported
-            supported.insert(removed_nodes.begin(), removed_nodes.end());
-        }
-        // In case some ops not in orederd
-        if (query_by_memory_control) {
+            // Filter ShapeOfs
+            filter_shapeOf(supported, removed_nodes);
+            // In case some ops not in orederd
             bool changed = true;
             while (changed) {
                 changed = false;
@@ -343,11 +341,13 @@ std::unordered_set<std::string> ov::get_supported_nodes(
                 }
             }
             int64_t total_len = 0;
+            // std::cout << "*******************\n";
             for (auto& op : model->get_ordered_ops()) {
                 if (supported.count(op->get_friendly_name()) && !ov::op::util::is_constant(op) &&
                     !ov::op::util::is_parameter(op)) {
                     if (has_users_unsupported(supported, op)) {
                         int64_t op_size = 1;
+                        // std::cout << op->get_friendly_name() << " " << op->get_output_partial_shape(0) << std::endl;
                         for (size_t shape_id = 0; shape_id < op->get_output_partial_shape(0).size(); shape_id++) {
                             try {
                                 int64_t len = op->get_output_partial_shape(0)[shape_id].get_length();
@@ -360,18 +360,185 @@ std::unordered_set<std::string> ov::get_supported_nodes(
                     }
                 }
             }
+            std::cout << "******************* " << total_len << std::endl;;
             if ((total_len < last_total_len || last_total_len == 0) && !stop_split) {
                 last_total_len = total_len;
                 copy_set(supported, temp_supported_1);
                 copy_set(unsupported, temp_unsupported_1);
             }
-        }
-    } while (!stop_split && query_by_memory_control);
-    if (query_by_memory_control) {
+            if (total_size != last_total_size) {
+                last_total_size = total_size;
+            } else {
+                stop_split = true;
+            }
+        } while (!stop_split);
+        std::cout << "last_total_len: " << last_total_len << " " << split_node_set.size() << std::endl;
         copy_set(temp_supported_1, supported);
         copy_set(temp_unsupported_1, unsupported);
+    } else {
+        // Filter ShapeOfs
+        filter_shapeOf(supported, removed_nodes);
+        // If memory control is off
+        // mark all removed nodes as supported
+        supported.insert(removed_nodes.begin(), removed_nodes.end());
     }
-    std::cout << "last_total_len: " << last_total_len << " " << split_node_set.size() << std::endl;
+
+    // NameSet temp_supported;
+    // NameSet temp_unsupported;
+    // NameSet temp_supported_1;
+    // NameSet temp_unsupported_1;
+    // std::set<std::string> split_node_set;
+    // uint32_t last_total_len = 0;
+    // bool stop_split = false;
+    // unsigned long total_ops_size = 0;
+    // for (auto&& op : ops) {
+    //     if (ov::op::util::is_constant(op)) {
+    //         const auto const_byte_size = op->get_element_type().size() * shape_size(op->get_shape());
+    //         total_ops_size += const_byte_size;
+    //     }
+    // }
+    // if (total_ops_size == 0 || supported.size() == 0) {
+    //     query_by_memory_control = false;
+    // }
+    // std::cout << "total_ops_size: " << total_ops_size << std::endl;
+    // std::cout << "query_model_ratio: " << query_model_ratio << std::endl;
+    // if (query_by_memory_control) {
+    //     copy_set(supported, temp_supported);
+    //     copy_set(unsupported, temp_unsupported);
+    // }
+
+    // double last_total_size = 0.0;
+    // do {
+    //     std::map<std::string, int> pair_checker_temp;
+    //     bool ready_split = false;
+    //     bool start_split = false;
+    //     double total_size = 0.0;
+    //     if (query_by_memory_control) {
+    //         copy_set(temp_supported, supported);
+    //         copy_set(temp_unsupported, unsupported);
+    //     }
+
+    //     // Walk over transformed model for special handing of Parameters/Constants/Results
+    //     for (auto&& op : ops) {
+    //         // Mark Constants and all fused names as unsupported if they are have no
+    //         // supported consumers/sources
+    //         // if (ov::op::util::is_constant(op)) {
+    //         //     if (has_all_consumers_unsupported(supported, op)) {
+    //         //         remove_op_from_supported(op);
+    //         //         continue;
+    //         //     }
+    //         // }
+    //         if (query_by_memory_control && supported.count(op->get_friendly_name()) && !stop_split) {
+    //             if (const auto& assign = std::dynamic_pointer_cast<ov::op::util::VariableExtension>(op)) {
+    //                 if (pair_checker_temp.count(assign->get_variable_id()) == 0) {
+    //                     pair_checker_temp[assign->get_variable_id()] = 1;
+    //                 } else {
+    //                     pair_checker_temp[assign->get_variable_id()]++;
+    //                 }
+    //             }
+    //             if (ov::op::util::is_constant(op) && !ready_split) {
+    //                 const auto const_byte_size = op->get_element_type().size() * shape_size(op->get_shape());
+    //                 total_size += const_byte_size;
+    //                 if (total_size >= query_model_ratio * total_ops_size * 1.05) {
+    //                     std::cout << "total_size: " << total_size << std::endl;
+    //                     stop_split = true;
+    //                     break;
+    //                 }
+    //                 if (total_size >= query_model_ratio * total_ops_size * 0.95) {
+    //                     if (!ready_split && split_node_set.find(op->get_friendly_name()) == split_node_set.end()) {
+    //                         ready_split = check_pairs(pair_checker_temp);
+    //                         if (ready_split) {
+    //                             std::cout << "total_size: " << total_size << std::endl;
+    //                             split_node_set.insert(op->get_friendly_name());
+    //                             continue;
+    //                         }
+    //                     }
+    //                 }
+    //             }
+    //             if (ready_split) {
+    //                 if (ov::op::util::is_constant(op)) {
+    //                     remove_op_from_supported(op);
+    //                     start_split = true;
+    //                 } else if (start_split) {
+    //                     remove_op_from_supported(op);
+    //                     for (auto& input : op->inputs()) {
+    //                         const auto& node = get_input_node(input);
+    //                         if (ov::op::util::is_constant(node)) {
+    //                             remove_op_from_supported(node);
+    //                         }
+    //                     }
+    //                 }
+    //             }
+    //         }
+    //     }
+
+    //     NameSet removed_nodes = get_removed_nodes(model, transformed_model);
+    //     // Filter ShapeOfs
+    //     for (auto& op : model->get_ordered_ops()) {
+    //         const auto& name = op->get_friendly_name();
+    //         if (ov::is_type<ov::op::util::ShapeOfBase>(op) && (supported.count(name) || removed_nodes.count(name))) {
+    //             if (has_all_consumers_unsupported(supported, op) && has_all_consumers_unsupported(removed_nodes, op)) {
+    //                 remove_op_from_supported(op);
+    //                 removed_nodes.erase(name);
+    //             }
+    //         }
+    //     }
+
+    //     if (!query_by_memory_control) {
+    //         // If memory control is off
+    //         // mark all removed nodes as supported
+    //         supported.insert(removed_nodes.begin(), removed_nodes.end());
+    //     }
+    //     // In case some ops not in orederd
+    //     if (query_by_memory_control) {
+    //         bool changed = true;
+    //         while (changed) {
+    //             changed = false;
+    //             for (auto& op : model->get_ordered_ops()) {
+    //                 if (!supported.count(op->get_friendly_name()) && has_users_supported(supported, op) &&
+    //                     !unsupported.count(op->get_friendly_name())) {
+    //                     supported.insert(op->get_friendly_name());
+    //                     changed = true;
+    //                 }
+    //             }
+    //         }
+    //         int64_t total_len = 0;
+    //         // std::cout << "*******************\n";
+    //         for (auto& op : model->get_ordered_ops()) {
+    //             if (supported.count(op->get_friendly_name()) && !ov::op::util::is_constant(op) &&
+    //                 !ov::op::util::is_parameter(op)) {
+    //                 if (has_users_unsupported(supported, op)) {
+    //                     int64_t op_size = 1;
+    //                     // std::cout << op->get_friendly_name() << " " << op->get_output_partial_shape(0) << std::endl;
+    //                     for (size_t shape_id = 0; shape_id < op->get_output_partial_shape(0).size(); shape_id++) {
+    //                         try {
+    //                             int64_t len = op->get_output_partial_shape(0)[shape_id].get_length();
+    //                             if (len >= 1)
+    //                                 op_size *= len;
+    //                         } catch (...) {
+    //                         }
+    //                     }
+    //                     total_len += op_size;
+    //                 }
+    //             }
+    //         }
+    //         std::cout << "******************* " << total_len << std::endl;;
+    //         if ((total_len < last_total_len || last_total_len == 0) && !stop_split) {
+    //             last_total_len = total_len;
+    //             copy_set(supported, temp_supported_1);
+    //             copy_set(unsupported, temp_unsupported_1);
+    //         }
+    //     }
+    //     if (total_size != last_total_size) {
+    //         last_total_size = total_size;
+    //     } else {
+    //         stop_split = true;
+    //     }
+    // } while (!stop_split && query_by_memory_control);
+    // if (query_by_memory_control) {
+    //     copy_set(temp_supported_1, supported);
+    //     copy_set(temp_unsupported_1, unsupported);
+    // }
 
     // Finally get intersection of all supported operation names
     // and operation names from original model
