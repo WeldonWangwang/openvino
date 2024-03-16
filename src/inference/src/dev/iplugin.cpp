@@ -4,11 +4,7 @@
 
 #include "openvino/runtime/iplugin.hpp"
 
-#include <openvino/core/graph_util.hpp>
-
-#include "openvino/op/broadcast.hpp"
 #include "openvino/op/convert.hpp"
-#include "openvino/op/gather.hpp"
 #include "openvino/op/util/op_types.hpp"
 #include "openvino/op/util/shape_of_base.hpp"
 #include "openvino/pass/manager.hpp"
