@@ -164,6 +164,8 @@ std::pair<ov::SupportedOpsMap, ov::hetero::SubgraphsMappingInfo> ov::hetero::Plu
         auto supported_properties = get_core()->get_property(device_name, ov::supported_properties);
         if (ov::util::contains(supported_properties, ov::query_model_ratio)) {
             if (fallback_device) {
+                std::cout << "fallback model_ratio: " << device_name << " "
+                          << "1.0" << std::endl;
                 device_config[ov::query_model_ratio.name()] = 1.0f;
             } else {
                 size_t total_ops_size = 0;
@@ -174,6 +176,8 @@ std::pair<ov::SupportedOpsMap, ov::hetero::SubgraphsMappingInfo> ov::hetero::Plu
                 }
                 // Check if there is a device that can take the entire model
                 if (device_mem_map[device_name] >= 1.2 * total_ops_size) {
+                    std::cout << "0 model_ratio: " << device_name << " "
+                              << "1.0" << std::endl;
                     device_config[ov::query_model_ratio.name()] = 1.0f;
                 } else if (device_mem_map["all_left"] >= 1.2 * total_ops_size ||
                            device_mem_map.find("CPU") != device_mem_map.end()) {
@@ -181,10 +185,12 @@ std::pair<ov::SupportedOpsMap, ov::hetero::SubgraphsMappingInfo> ov::hetero::Plu
                     if (total_ops_size < device_mem_map[device_name]) {
                         model_ratio = 1.0f;
                     }
+                    std::cout << "1 model_ratio: " << device_name << " " << model_ratio << std::endl;
                     device_config[ov::query_model_ratio.name()] = model_ratio;
                 } else {
                     float model_ratio =
                         static_cast<float>(device_mem_map[device_name] * 1.0 / device_mem_map["all_left"]);
+                    std::cout << "2 model_ratio: " << device_name << " " << model_ratio << std::endl;
                     device_config[ov::query_model_ratio.name()] = model_ratio;
                 }
                 if (device_mem_map.find(device_name) != device_mem_map.end()) {

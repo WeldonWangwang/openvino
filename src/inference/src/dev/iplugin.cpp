@@ -351,6 +351,7 @@ std::unordered_set<std::string> ov::get_supported_nodes(
                     }
                 }
             }
+            std::cout << "total_len: " << total_len << std::endl;
             if ((total_len < last_total_len || last_total_len == 0) && !stop_split) {
                 last_total_len = total_len;
                 copy_set(supported, temp_supported_1);
