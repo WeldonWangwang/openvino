@@ -183,8 +183,9 @@ std::pair<ov::SupportedOpsMap, ov::hetero::SubgraphsMappingInfo> ov::hetero::Plu
                     }
                     device_config[ov::query_model_ratio.name()] = model_ratio;
                 } else {
-                    float model_ratio =
-                        static_cast<float>(device_mem_map[device_name] * 1.0 / device_mem_map["all_left"]);
+                    // float model_ratio =
+                    //     static_cast<float>(device_mem_map[device_name] * 1.0 / device_mem_map["all_left"]);
+                    float model_ratio = static_cast<float>(device_mem_map[device_name] * 1.0 / (total_ops_size * 1.5));
                     device_config[ov::query_model_ratio.name()] = model_ratio;
                 }
                 if (device_mem_map.find(device_name) != device_mem_map.end()) {
