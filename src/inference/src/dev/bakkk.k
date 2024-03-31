@@ -4,6 +4,7 @@
 
 #include "openvino/runtime/iplugin.hpp"
 
+#include "openvino/op/broadcast.hpp"
 #include "openvino/op/convert.hpp"
 #include "openvino/op/util/op_types.hpp"
 #include "openvino/op/util/shape_of_base.hpp"
@@ -367,9 +368,10 @@ std::unordered_set<std::string> ov::get_supported_nodes(
                     }
                 }
             }
-            // Filter the fused ops
             for (auto& op : model->get_ordered_ops()) {
                 const auto& name = op->get_friendly_name();
+                // Some ops in other layers will be fused with Broadcast op in some models, so need filter the fused ops
+                // in other layers
                 if (removed_nodes.count(name)) {
                     if (has_all_consumers_unsupported(supported, op) &&
                         has_all_consumers_unsupported(removed_nodes, op)) {
