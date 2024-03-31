@@ -10,7 +10,9 @@
 #include "openvino/pass/manager.hpp"
 #include "transformations/common_optimizations/fused_names_cleanup.hpp"
 #include "transformations/rt_info/fused_names_attribute.hpp"
-
+#include "openvino/op/ops.hpp"
+// #include "intel_gpu/op/fully_connected.hpp"
+// #include "intel_gpu/op/fully_connected_compressed.hpp"
 namespace {
 
 std::unordered_set<std::string> get_removed_nodes(const std::shared_ptr<const ov::Model>& original_model,
@@ -104,6 +106,8 @@ std::unordered_set<std::string> ov::get_supported_nodes(
     m.run_passes(transformed_model);
 
     transform(transformed_model);
+    // if (query_by_memory_control)
+    //     ov::serialize(transformed_model, "chatglm3-6b-transformed.xml");
     auto ops = transformed_model->get_ordered_ops();
 
     NameSet supported;
@@ -251,6 +255,9 @@ std::unordered_set<std::string> ov::get_supported_nodes(
 
     size_t total_ops_size = 0;
     for (auto&& op : ops) {
+        if (ov::is_type<ov::op::v0::MatMul>(op)) {
+            std::cout << op->get_friendly_name() << std::endl;
+        }
         if (ov::op::util::is_constant(op)) {
             const auto const_byte_size = op->get_element_type().size() * shape_size(op->get_shape());
             total_ops_size += const_byte_size;

@@ -18,11 +18,14 @@ file (GLOB LIBRARY_SRC
         ${CMAKE_CURRENT_SOURCE_DIR}/src/threading/*.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/cpp/*.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/cpp_interfaces/interface/*.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../plugins/intel_gpu/include/intel_gpu/op/*.cpp
       )
 
 file (GLOB LIBRARY_HEADERS
        ${CMAKE_CURRENT_SOURCE_DIR}/src/*.h
        ${CMAKE_CURRENT_SOURCE_DIR}/src/*.hpp
+       ${CMAKE_CURRENT_SOURCE_DIR}/../plugins/intel_gpu/include/intel_gpu/op/*.h
+       ${CMAKE_CURRENT_SOURCE_DIR}/../plugins/intel_gpu/include/intel_gpu/op/*.hpp
       )
 
 if(WIN32)
