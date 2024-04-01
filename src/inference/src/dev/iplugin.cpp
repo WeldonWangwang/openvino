@@ -253,16 +253,63 @@ std::unordered_set<std::string> ov::get_supported_nodes(
         }
     }
 
+    // auto get_matmul_size = [&](const NodePtr& op) {
+    //     int64_t op_size = 1;
+    //     for (size_t shape_id = 0; shape_id < op->get_output_partial_shape(0).size(); shape_id++) {
+    //         if (!op->get_output_partial_shape(0)[shape_id].is_dynamic()) {
+    //             int64_t len = op->get_output_partial_shape(0)[shape_id].get_length();
+    //             if (len >= 1)
+    //                 op_size *= len;
+    //         }
+    //     }
+    //     return op_size;
+    // };
+
+    auto get_matmul_size = [&](const NodePtr& op) {
+        // std::cout << "op-name: " << op->get_friendly_name() << " ";
+        int64_t op_size = 1;
+        for (auto& input : op->inputs()) {
+            const auto& node = get_input_node(input);
+            // std::cout << "input: " << node->get_friendly_name() << " [";
+            for (size_t shape_id = 0; shape_id < node->get_output_partial_shape(0).size(); shape_id++) {
+                if (!node->get_output_partial_shape(0)[shape_id].is_dynamic()) {
+                    int64_t len = node->get_output_partial_shape(0)[shape_id].get_length();
+                    // std::cout << len << ",";
+                    if (len >= 1)
+                        op_size *= len;
+                }
+            }
+            // std::cout << "] ";
+        }
+        // std::cout << std::endl;
+        return op_size;
+    };
+
+
     size_t total_ops_size = 0;
     for (auto&& op : ops) {
         if (ov::is_type<ov::op::v0::MatMul>(op)) {
-            std::cout << op->get_friendly_name() << std::endl;
+            // std::cout << op->get_friendly_name() << std::endl;
+            auto op_size = get_matmul_size(op);
+            // std::cout << "op_size: " << get_matmul_size(op) << std::endl;
+            total_ops_size += op_size;
         }
-        if (ov::op::util::is_constant(op)) {
-            const auto const_byte_size = op->get_element_type().size() * shape_size(op->get_shape());
-            total_ops_size += const_byte_size;
-        }
+        // if (ov::op::util::is_constant(op)) {
+        //     const auto const_byte_size = op->get_element_type().size() * shape_size(op->get_shape());
+        //     total_ops_size += const_byte_size;
+        // }
     }
+
+    // size_t total_ops_size = 0;
+    // for (auto&& op : ops) {
+    //     // if (ov::is_type<ov::op::v0::MatMul>(op)) {
+    //     //     std::cout << op->get_friendly_name() << std::endl;
+    //     // }
+    //     if (ov::op::util::is_constant(op)) {
+    //         const auto const_byte_size = op->get_element_type().size() * shape_size(op->get_shape());
+    //         total_ops_size += const_byte_size;
+    //     }
+    // }
     // If there is no constant or supported nodes in the model, mark query_by_memory_control as false
     if (total_ops_size == 0 || supported.size() == 0) {
         query_by_memory_control = false;
@@ -296,15 +343,16 @@ std::unordered_set<std::string> ov::get_supported_nodes(
             for (auto&& op : ops) {
                 if (supported.count(op->get_friendly_name()) && !cancel_split) {
                     if (const auto& assign = std::dynamic_pointer_cast<ov::op::util::VariableExtension>(op)) {
+                        std::cout << assign->get_variable_id() << std::endl;
                         if (temp_pair_checker.count(assign->get_variable_id()) == 0) {
                             temp_pair_checker[assign->get_variable_id()] = 1;
                         } else {
                             temp_pair_checker[assign->get_variable_id()]++;
                         }
                     }
-                    if (ov::op::util::is_constant(op) && !ready_split) {
-                        const auto const_byte_size = op->get_element_type().size() * shape_size(op->get_shape());
-                        total_size += const_byte_size;
+                    if (ov::is_type<ov::op::v0::MatMul>(op) && !ready_split) {
+                        // const auto const_byte_size = op->get_element_type().size() * shape_size(op->get_shape());
+                        total_size += get_matmul_size(op);
                         // If the total size is 1.05 times larger than the user's requirement:
                         // - If has_min_graph = false, it means there is no nodes meets requirement, so need cancel
                         //   split and break
@@ -334,6 +382,8 @@ std::unordered_set<std::string> ov::get_supported_nodes(
                     if (ready_split) {
                         if (ov::op::util::is_constant(op)) {
                             remove_op_from_supported(op);
+                            if (!start_split)
+                                std::cout << "start split\n";
                             start_split = true;
                         } else if (start_split) {
                             remove_op_from_supported(op);
