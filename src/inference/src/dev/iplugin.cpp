@@ -286,30 +286,30 @@ std::unordered_set<std::string> ov::get_supported_nodes(
     };
 
 
-    // size_t total_ops_size = 0;
-    // for (auto&& op : ops) {
-    //     if (ov::is_type<ov::op::v0::MatMul>(op)) {
-    //         // std::cout << op->get_friendly_name() << std::endl;
-    //         auto op_size = get_matmul_size(op);
-    //         // std::cout << "op_size: " << get_matmul_size(op) << std::endl;
-    //         total_ops_size += op_size;
-    //     }
-    //     // if (ov::op::util::is_constant(op)) {
-    //     //     const auto const_byte_size = op->get_element_type().size() * shape_size(op->get_shape());
-    //     //     total_ops_size += const_byte_size;
-    //     // }
-    // }
-
     size_t total_ops_size = 0;
     for (auto&& op : ops) {
-        // if (ov::is_type<ov::op::v0::MatMul>(op)) {
-        //     std::cout << op->get_friendly_name() << std::endl;
-        // }
-        if (ov::op::util::is_constant(op)) {
-            const auto const_byte_size = op->get_element_type().size() * shape_size(op->get_shape());
-            total_ops_size += const_byte_size;
+        if (ov::is_type<ov::op::v0::MatMul>(op)) {
+            // std::cout << op->get_friendly_name() << std::endl;
+            auto op_size = get_matmul_size(op);
+            // std::cout << "op_size: " << get_matmul_size(op) << std::endl;
+            total_ops_size += op_size;
         }
+        // if (ov::op::util::is_constant(op)) {
+        //     const auto const_byte_size = op->get_element_type().size() * shape_size(op->get_shape());
+        //     total_ops_size += const_byte_size;
+        // }
     }
+
+    // size_t total_ops_size = 0;
+    // for (auto&& op : ops) {
+    //     // if (ov::is_type<ov::op::v0::MatMul>(op)) {
+    //     //     std::cout << op->get_friendly_name() << std::endl;
+    //     // }
+    //     if (ov::op::util::is_constant(op)) {
+    //         const auto const_byte_size = op->get_element_type().size() * shape_size(op->get_shape());
+    //         total_ops_size += const_byte_size;
+    //     }
+    // }
     // If there is no constant or supported nodes in the model, mark query_by_memory_control as false
     if (total_ops_size == 0 || supported.size() == 0) {
         query_by_memory_control = false;
@@ -350,9 +350,9 @@ std::unordered_set<std::string> ov::get_supported_nodes(
                             temp_pair_checker[assign->get_variable_id()]++;
                         }
                     }
-                    if (ov::op::util::is_constant(op) && !ready_split) {
-                        const auto const_byte_size = op->get_element_type().size() * shape_size(op->get_shape());
-                        total_size += const_byte_size;
+                    if (ov::is_type<ov::op::v0::MatMul>(op) && !ready_split) {
+                        // const auto const_byte_size = op->get_element_type().size() * shape_size(op->get_shape());
+                        total_size += get_matmul_size(op);
                         // If the total size is 1.05 times larger than the user's requirement:
                         // - If has_min_graph = false, it means there is no nodes meets requirement, so need cancel
                         //   split and break
