@@ -168,8 +168,10 @@ std::pair<ov::SupportedOpsMap, ov::hetero::SubgraphsMappingInfo> ov::hetero::Plu
                 //     }
                 //     device_config[ov::query_model_ratio.name()] = model_ratio;
                 // } else {
-                    float model_ratio = static_cast<float>(available_device_mem_map[device_name] * 1.0 /
-                                                           available_discrete_device_memory);
+                    // float model_ratio = static_cast<float>(available_device_mem_map[device_name] * 1.0 /
+                    //                                        available_discrete_device_memory);
+                    float model_ratio = 0.5f;
+
                     device_config[ov::query_model_ratio.name()] = model_ratio;
                 // }
                 // Remove the current device

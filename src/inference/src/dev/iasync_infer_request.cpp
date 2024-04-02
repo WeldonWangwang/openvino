@@ -26,6 +26,11 @@ struct ImmediateStreamsExecutor : public ov::threading::ITaskExecutor {
 }  // namespace
 
 ov::IAsyncInferRequest::~IAsyncInferRequest() {
+    try {
+        std::cout << infer_time_map.first << " " << infer_time_map.second.second.count() << std::endl;
+    } catch(...) {
+    }
+        
     stop_and_wait();
 }
 
@@ -115,6 +120,8 @@ void ov::IAsyncInferRequest::run_first_stage(const Pipeline::iterator itBeginSta
                                              const std::shared_ptr<ov::threading::ITaskExecutor> callbackExecutor) {
     auto& firstStageExecutor = std::get<Stage_e::EXECUTOR>(*itBeginStage);
     OPENVINO_ASSERT(nullptr != firstStageExecutor);
+    infer_time_map.second.first = std::chrono::steady_clock::now();
+
     firstStageExecutor->run(make_next_stage_task(itBeginStage, itEndStage, std::move(callbackExecutor)));
 }
 
@@ -169,6 +176,11 @@ ov::threading::Task ov::IAsyncInferRequest::make_next_stage_task(
                 };
 
                 if (nullptr == callbackExecutor) {
+                    infer_time_map.second.second = std::chrono::steady_clock::now() - infer_time_map.second.first;
+                    try {
+                        infer_time_map.first = get_device_name();
+                    } catch (...) {
+                    }
                     lastStageTask();
                 } else {
                     callbackExecutor->run(std::move(lastStageTask));
@@ -263,6 +275,10 @@ void ov::IAsyncInferRequest::check_tensors() const {
 
 const std::shared_ptr<const ov::ICompiledModel>& ov::IAsyncInferRequest::get_compiled_model() const {
     return m_sync_request->get_compiled_model();
+}
+
+const std::string ov::IAsyncInferRequest::get_device_name() const {
+    return m_sync_request->get_device_name();
 }
 
 const std::vector<ov::Output<const ov::Node>>& ov::IAsyncInferRequest::get_inputs() const {

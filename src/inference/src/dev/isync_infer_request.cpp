@@ -117,7 +117,15 @@ const std::vector<ov::Output<const ov::Node>>& ov::ISyncInferRequest::get_output
     return m_compiled_model->outputs();
 }
 const std::shared_ptr<const ov::ICompiledModel>& ov::ISyncInferRequest::get_compiled_model() const {
+    // auto context = m_compiled_model->get_context();
+    // std::cout << "dev: " << context->get_device_name() << std::endl;
     return m_compiled_model;
+}
+
+const std::string ov::ISyncInferRequest::get_device_name() const {
+    // auto context = m_compiled_model->get_context();
+    // std::cout << "dev: " << context->get_device_name() << std::endl;
+    return m_compiled_model->get_context()->get_device_name();
 }
 
 ov::ISyncInferRequest::FoundPort ov::ISyncInferRequest::find_port(const ov::Output<const ov::Node>& port) const {

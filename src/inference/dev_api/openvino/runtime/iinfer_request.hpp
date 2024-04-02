@@ -102,6 +102,7 @@ public:
      * @return Pointer to the compiled model
      */
     virtual const std::shared_ptr<const ov::ICompiledModel>& get_compiled_model() const = 0;
+    virtual const std::string get_device_name() const = 0;
 
     /**
      * @brief Gets inputs for infer request

@@ -139,6 +139,7 @@ public:
      * @return Pointer to the compiled model
      */
     const std::shared_ptr<const ov::ICompiledModel>& get_compiled_model() const override;
+    const std::string get_device_name() const override;
 
     /**
      * @brief Gets inputs for infer request
@@ -268,6 +269,7 @@ private:
         }
     }
 
+    std::pair<std::string, std::pair<std::chrono::time_point<std::chrono::steady_clock>, std::chrono::duration<double, std::milli>>> infer_time_map;
     std::shared_ptr<IInferRequest> m_sync_request;
 
     std::shared_ptr<ov::threading::ITaskExecutor> m_request_executor;  //!< Used to run inference CPU tasks.

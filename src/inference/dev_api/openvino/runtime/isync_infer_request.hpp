@@ -107,6 +107,8 @@ public:
      * @return Pointer to the compiled model
      */
     const std::shared_ptr<const ov::ICompiledModel>& get_compiled_model() const override;
+    
+    const std::string get_device_name() const override;
 
 protected:
     struct FoundPort {
