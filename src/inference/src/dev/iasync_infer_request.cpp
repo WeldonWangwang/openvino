@@ -27,7 +27,7 @@ struct ImmediateStreamsExecutor : public ov::threading::ITaskExecutor {
 
 ov::IAsyncInferRequest::~IAsyncInferRequest() {
     try {
-        std::cout << infer_time_map.first << " " << infer_time_map.second.second.count() << std::endl;
+        std::cout << "Total: " << this << " " << infer_time_map.first << " " << infer_time_map.second.second.count() << std::endl;
     } catch(...) {
     }
         
@@ -121,6 +121,7 @@ void ov::IAsyncInferRequest::run_first_stage(const Pipeline::iterator itBeginSta
     auto& firstStageExecutor = std::get<Stage_e::EXECUTOR>(*itBeginStage);
     OPENVINO_ASSERT(nullptr != firstStageExecutor);
     infer_time_map.second.first = std::chrono::steady_clock::now();
+    // std::cout << "start: " << this << std::endl;
 
     firstStageExecutor->run(make_next_stage_task(itBeginStage, itEndStage, std::move(callbackExecutor)));
 }
@@ -174,13 +175,13 @@ ov::threading::Task ov::IAsyncInferRequest::make_next_stage_task(
                         promise.set_exception(currentException);
                     }
                 };
-
+                // std::cout << "end: " << this << std::endl;
+                infer_time_map.second.second += std::chrono::steady_clock::now() - infer_time_map.second.first;
+                try {
+                    infer_time_map.first = get_device_name();
+                } catch (...) {
+                }
                 if (nullptr == callbackExecutor) {
-                    infer_time_map.second.second = std::chrono::steady_clock::now() - infer_time_map.second.first;
-                    try {
-                        infer_time_map.first = get_device_name();
-                    } catch (...) {
-                    }
                     lastStageTask();
                 } else {
                     callbackExecutor->run(std::move(lastStageTask));

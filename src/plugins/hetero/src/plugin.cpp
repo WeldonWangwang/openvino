@@ -150,6 +150,7 @@ std::pair<ov::SupportedOpsMap, ov::hetero::SubgraphsMappingInfo> ov::hetero::Plu
                         total_ops_size += op->get_element_type().size() * shape_size(op->get_shape());
                     }
                 }
+                std::cout << "total_ops_size: " << total_ops_size << std::endl;
                 for (auto& device_mem_info : available_device_mem_map) {
                     if (device_mem_info.first.find("CPU") != 0)
                         available_discrete_device_memory += device_mem_info.second;
