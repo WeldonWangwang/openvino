@@ -174,6 +174,7 @@ std::pair<ov::SupportedOpsMap, ov::hetero::SubgraphsMappingInfo> ov::hetero::Plu
                     float model_ratio = 0.5f;
 
                     device_config[ov::query_model_ratio.name()] = model_ratio;
+                    std::cout << device_name << " " << model_ratio << std::endl;
                 // }
                 // Remove the current device
                 available_device_mem_map.erase(device_name);
