@@ -118,6 +118,13 @@ void ov::hetero::CompiledModel::compile_model(const std::shared_ptr<ov::Model>& 
         for (const auto& subgraph : ordered_subgraphs) {
             m_compiled_submodels[id].device = subgraph->get_affinity();
             m_compiled_submodels[id].model = subgraph->get_function();
+            size_t total_ops_size = 0;
+            for (auto&& op : m_compiled_submodels[id].model->get_ordered_ops()) {
+                if (ov::op::util::is_constant(op)) {
+                    total_ops_size += op->get_element_type().size() * shape_size(op->get_shape());
+                }
+            }
+            std::cout << "id: " << id << " size: " << total_ops_size << std::endl;
             compile_device_model(m_compiled_submodels[id], add_exclusive);
             ++id;
         }
