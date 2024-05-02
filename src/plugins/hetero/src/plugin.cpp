@@ -182,7 +182,7 @@ std::pair<ov::SupportedOpsMap, ov::hetero::SubgraphsMappingInfo> ov::hetero::Plu
                 // 1. Check if the devices with same type
                 // 2. Check if current device that can take the entire model
                 // 3. Check if all left devices can take the entire model
-                if (devices_with_same_type) {
+                if (true) {
                     model_ratio = available_discrete_device_memory > 0
                                       ? static_cast<float>(available_device_mem_map[device_name] * 1.0 /
                                                            available_discrete_device_memory)
