@@ -4,6 +4,8 @@
 
 #include "async_infer_request.h"
 
+#include "openvino/runtime/threading/cpu_message.hpp"
+
 ov::intel_cpu::AsyncInferRequest::AsyncInferRequest(
     const std::shared_ptr<IInferRequest>& request,
     const std::shared_ptr<ov::threading::ITaskExecutor>& task_executor,
@@ -13,6 +15,11 @@ ov::intel_cpu::AsyncInferRequest::AsyncInferRequest(
 }
 
 ov::intel_cpu::AsyncInferRequest::~AsyncInferRequest() {
+    if (m_has_sub_infers) {
+        auto message = ov::threading::message_manager();
+        message->stop_server_thread();
+        message->clear();
+    }
     stop_and_wait();
 }
 

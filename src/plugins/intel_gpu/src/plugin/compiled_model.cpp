@@ -11,6 +11,7 @@
 #include "intel_gpu/plugin/graph.hpp"
 #include "intel_gpu/plugin/compiled_model.hpp"
 #include "intel_gpu/plugin/async_infer_request.hpp"
+#include "openvino/runtime/threading/cpu_message.hpp"
 
 #include <sys/types.h>
 
@@ -31,9 +32,17 @@ std::shared_ptr<ov::threading::ITaskExecutor> create_task_executor(const std::sh
                                                     1,
                                                     ov::hint::SchedulingCoreType::PCORE_ONLY,
                                                     true});
-    } else {
+    } else if (config.enableSubStreams) {
         return std::make_shared<ov::threading::CPUStreamsExecutor>(
             ov::threading::IStreamsExecutor::Config{"Intel GPU plugin executor", config.get_property(ov::num_streams)});
+    } else {
+        if (config.subStreamExecConfig.get_name() != "StreamsExecutor") {
+            ov::threading::IStreamsExecutor::Config executor_confg = std::move(config.subStreamExecConfig);
+            return std::make_shared<ov::threading::CPUStreamsExecutor>(executor_confg);
+        } else {
+            return std::make_shared<ov::threading::CPUStreamsExecutor>(
+                ov::threading::IStreamsExecutor::Config{"Intel GPU plugin executor", config.get_property(ov::num_streams)});
+        }
     }
 }
 }  // namespace
@@ -47,6 +56,7 @@ CompiledModel::CompiledModel(std::shared_ptr<ov::Model> model,
                          context,
                          create_task_executor(plugin, config),
                          nullptr)
+    // : ov::ICompiledModel::ICompiledModel(model, plugin)
     , m_context(context)
     , m_config(config)
     , m_wait_executor(std::make_shared<ov::threading::CPUStreamsExecutor>(ov::threading::IStreamsExecutor::Config{"Intel GPU plugin wait executor"}))
@@ -58,6 +68,43 @@ CompiledModel::CompiledModel(std::shared_ptr<ov::Model> model,
     for (uint16_t n = 0; n < m_config.get_property(ov::num_streams); n++) {
         auto graph = n == 0 ? graph_base : std::make_shared<Graph>(graph_base, n);
         m_graphs.push_back(graph);
+    }
+    if (m_config.enableSubStreams) {
+        std::vector<ExecutionConfig> configs_for_tp;
+        configs_for_tp.resize(m_config.get_context_for_tp().size());
+        m_subCompileModel = true;
+        auto message = ov::threading::message_manager();
+        auto tp_compile_executor = get_plugin()->get_executor_manager()->get_idle_cpu_streams_executor(ov::threading::IStreamsExecutor::Config{
+                "async compile executor for TP",
+                static_cast<int>(std::thread::hardware_concurrency()) /* max possible #streams*/,
+                0});
+        std::vector<std::shared_ptr<ov::ICompiledModel>> sub_models;
+        std::vector<ov::threading::Task> sub_tasks;
+        for (size_t i = 0; i < m_config.get_context_for_tp().size(); i++) {
+            auto compile_tp_model = [&](size_t i) {
+                configs_for_tp[i] = m_config;
+                configs_for_tp[i].enableSubStreams = false;
+                auto streamExecutorConfig = ov::threading::IStreamsExecutor::Config{"GPUStreamsExecutor",
+                                                                 1,
+                                                                 0,
+                                                                 ov::hint::SchedulingCoreType::ANY_CORE,
+                                                                 false,
+                                                                 false,
+                                                                 {},
+                                                                 configs_for_tp[i].streamsRankTable[i]};
+                configs_for_tp[i].subStreamExecConfig = std::move(streamExecutorConfig);
+                sub_models.push_back(std::make_shared<CompiledModel>(
+                    model, plugin, m_config.get_context_for_tp()[i].as<RemoteContextImpl::Ptr>(), configs_for_tp[i]));
+                GPU_DEBUG_TRACE_DETAIL << "sub models for TP created, rank " << configs_for_tp[i].streamsRankTable[i][0] << std::endl;
+            };
+            sub_tasks.push_back(std::bind(compile_tp_model, i));
+        }
+        tp_compile_executor->run_and_wait(std::move(sub_tasks));
+        message->set_sub_compiled_models(sub_models);
+
+        // clear up the tp executor for async compile
+        get_plugin()->get_executor_manager()->clear("async compile executor for TP");
+        tp_compile_executor.reset();
     }
 }
 
@@ -162,6 +209,16 @@ std::shared_ptr<ov::IAsyncInferRequest> CompiledModel::create_infer_request() co
                                                                    get_task_executor(),
                                                                    m_wait_executor,
                                                                    get_callback_executor());
+    if (m_subCompileModel) {
+        auto message = ov::threading::message_manager();
+        auto sub_models = message->get_sub_compiled_models();
+        std::vector<std::shared_ptr<IAsyncInferRequest>> requests;
+        for (auto model : sub_models) {
+            requests.push_back(model->create_infer_request());
+        }
+        message->set_sub_infer_requests(requests);
+        async_infer_request->setSubInfer(true);
+    }
     return async_infer_request;
 }
 
@@ -220,13 +277,34 @@ void CompiledModel::export_model(std::ostream& model) const {
     get_graph(0)->export_model(ob);
 }
 
+CompiledModel::Ptr CompiledModel::get_tp_compiled_model() const {
+    auto messenger = ov::threading::message_manager();
+    auto sub_models = messenger->get_sub_compiled_models();
+    for (auto& iter : sub_models) {
+        if (iter->get_context()->get_device_name() == get_context()->get_device_name())
+            return std::dynamic_pointer_cast<CompiledModel>(iter);
+    }
+    return nullptr;
+}
+
 std::shared_ptr<const ov::Model> CompiledModel::get_runtime_model() const {
+    if (m_config.enableSubStreams) {
+       return get_tp_compiled_model()->get_runtime_model();
+    }
     return get_graph(0)->get_runtime_model();
 }
+
 const std::vector<std::shared_ptr<Graph>>& CompiledModel::get_graphs() const {
+    if (m_config.enableSubStreams) {
+        return get_tp_compiled_model()->get_graphs();
+    }
     return m_graphs;
 }
+
 std::shared_ptr<Graph> CompiledModel::get_graph(size_t n) const {
+    if (m_config.enableSubStreams) {
+        return get_tp_compiled_model()->get_graph(n);
+    }
     OPENVINO_ASSERT(m_graphs.size() >= n, "[GPU] Invalid graph idx: ", n, ". Only ", m_graphs.size(), " were created");
     return m_graphs[n];
 }
@@ -281,9 +359,9 @@ std::shared_ptr<ov::ISyncInferRequest> CompiledModel::create_sync_infer_request(
 
     for (auto& graph : m_graphs) {
         OPENVINO_ASSERT(graph != nullptr, "[GPU] Model not loaded: graph is nullptr");
-        OPENVINO_ASSERT(graph->is_loaded(), "[GPU] Model not loaded: invalid graph");
+        if (!m_config.enableSubStreams)
+            OPENVINO_ASSERT(graph->is_loaded(), "[GPU] Model not loaded: invalid graph");
     }
-
     return std::make_shared<SyncInferRequest>(std::static_pointer_cast<const CompiledModel>(shared_from_this()));
 }
 
