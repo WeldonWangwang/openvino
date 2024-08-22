@@ -17,7 +17,7 @@
 #include "intel_gpu/op/fully_connected_compressed.hpp"
 #include "intel_gpu/op/placeholder.hpp"
 #include "openvino/util/pp.hpp"
-
+#include "intel_gpu/op/sync_tensor.hpp"
 #ifdef __linux__
 # include <dlfcn.h>
 #endif
@@ -346,6 +346,11 @@ bool ProgramBuilder::requires_new_shape_infer(const std::shared_ptr<ov::Node>& o
         if (body_function->is_dynamic())
             return true;
     }
+
+    if (ov::is_type<ov::intel_gpu::op::SyncTensor>(op)) {
+        return true;
+    }
+
     // When input node has dynamic shape with 4 dimension, this function return false
     // because op.is_dynamic() which only checks input shapes return false.
     // So, in the case of input data, we need to check output shape.

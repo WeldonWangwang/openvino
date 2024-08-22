@@ -100,7 +100,7 @@ CompiledModel::CompiledModel(std::shared_ptr<ov::Model> model,
                                                                  configs_for_tp[i].streamsRankTable[i]};
                 configs_for_tp[i].subStreamExecConfig = std::move(streamExecutorConfig);
                 auto model_clone = model->clone();
-                // ov::serialize(model_clone, "./model_pa_o.xml", "./model_pa_o.bin");
+                ov::serialize(model_clone, "./model_pa_o.xml", "./model_pa_o.bin");
                 ov::pass::Manager manager;
                 manager.register_pass<PagedAttentionSplitInput>(m_config.get_context_for_tp().size(), i);
                 manager.run_passes(model_clone);
@@ -111,7 +111,7 @@ CompiledModel::CompiledModel(std::shared_ptr<ov::Model> model,
                 //    manager.register_pass<ov::intel_gpu::TensorParallelFusion>(config.get_context_for_tp().size(), i);
                 // // manager.register_pass<ov::pass::ConstantFolding>();
                 // manager.run_passes(model_clone);
-                // ov::serialize(model_clone, "bell_saved_" + std::to_string(i) + ".xml");
+                ov::serialize(model_clone, "xj_saved_" + std::to_string(i) + ".xml");
                 m_sub_compiled_models.push_back(std::make_shared<CompiledModel>(
                     model_clone, plugin, m_config.get_context_for_tp()[i].as<RemoteContextImpl::Ptr>(), configs_for_tp[i], m_sub_memory_manager));
                 GPU_DEBUG_TRACE_DETAIL << "sub models for TP created, rank " << configs_for_tp[i].streamsRankTable[i][0] << std::endl;
