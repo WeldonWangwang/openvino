@@ -289,7 +289,7 @@ PATensorParallelFusion::PATensorParallelFusion(size_t world_size, size_t world_r
                 }
             }
             if ((out_put_shape.size() == 4) && (out_put_shape[2].compatible(3)))
-                new_shape[3] = sum_size;
+                new_shape[3] = sum_size/3;
             if (out_put_shape.size() == 3)
                 new_shape[2] = sum_size;
             auto shape0 =
@@ -301,7 +301,7 @@ PATensorParallelFusion::PATensorParallelFusion(size_t world_size, size_t world_r
             new_reshape->set_friendly_name(reshape_node->get_friendly_name() + "_tp");
             std::cout << "[Reshape]" << reshape_node->get_friendly_name() << ": "
                       << reshape_node->get_input_partial_shape(0)
-                      << "old out shape: " << reshape_node->get_output_partial_shape(0)
+                      << ", old out shape: " << reshape_node->get_output_partial_shape(0)
                       << ", new:" << new_reshape->get_output_partial_shape(0) << std::endl;
             copy_runtime_info(reshape_node, new_reshape);
             replace_node(reshape_node, new_reshape);
@@ -378,6 +378,7 @@ PATensorParallelFusion::PATensorParallelFusion(size_t world_size, size_t world_r
                 find_ops_in_fc_to_pa(vector_visited_fc[j]);
                 for (size_t i = 0; i < vector_visited.size(); i++) {
                     auto cur_node = vector_visited[i];
+                    std::cout << cur_node->get_friendly_name() << std::endl;
                     if (ov::is_type<ov::intel_gpu::op::FullyConnected>(cur_node) ||
                         ov::is_type<ov::intel_gpu::op::FullyConnectedCompressed>(cur_node)) {
                         std::shared_ptr<ov::Node> new_fc = nullptr;
@@ -407,6 +408,20 @@ PATensorParallelFusion::PATensorParallelFusion(size_t world_size, size_t world_r
                         auto old_shape = cur_node->get_output_partial_shape(0);
                         cur_node->validate_and_infer_types();
                         std::cout << "[rope]" << cur_node->get_friendly_name()
+                                  << ": in:" << cur_node->get_input_partial_shape(0) << ", old out: " << old_shape
+                                  << ", new out:" << cur_node->get_output_partial_shape(0) << std::endl;
+                    }
+                    if (ov::is_type<ov::op::v1::Transpose>(cur_node)) {
+                        auto old_shape = cur_node->get_output_partial_shape(0);
+                        cur_node->validate_and_infer_types();
+                        std::cout << "[Transpose]" << cur_node->get_friendly_name()
+                                  << ": in:" << cur_node->get_input_partial_shape(0) << ", old out: " << old_shape
+                                  << ", new out:" << cur_node->get_output_partial_shape(0) << std::endl;
+                    }
+                    if (ov::is_type<ov::op::v8::Gather>(cur_node)) {
+                        auto old_shape = cur_node->get_output_partial_shape(0);
+                        cur_node->validate_and_infer_types();
+                        std::cout << "[Gather]" << cur_node->get_friendly_name()
                                   << ": in:" << cur_node->get_input_partial_shape(0) << ", old out: " << old_shape
                                   << ", new out:" << cur_node->get_output_partial_shape(0) << std::endl;
                     }
