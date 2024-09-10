@@ -102,8 +102,6 @@ CompiledModel::CompiledModel(std::shared_ptr<ov::Model> model,
                                                                  configs_for_tp[i].streamsRankTable[i]};
                 configs_for_tp[i].subStreamExecConfig = std::move(streamExecutorConfig);
                 auto model_clone = model->clone();
-                // ov::serialize(model_clone, "./model_pa_original.xml");
-                //ov::serialize(model_clone, "./model_pa_o.xml", "./model_pa_o.bin");
                 ov::pass::Manager manager;
                 bool has_pa_op = false;
                 std::set<std::string> kvcache_op;
@@ -131,7 +129,6 @@ CompiledModel::CompiledModel(std::shared_ptr<ov::Model> model,
                 }
                 manager.register_pass<ov::intel_gpu::RemainFCParallelFusion>(config.get_context_for_tp().size(), i);
                 manager.run_passes(model_clone);
-                //ov::serialize(model_clone, "integrated_vllm_pa_" + std::to_string(i) + ".xml");
                 m_sub_compiled_models.push_back(std::make_shared<CompiledModel>(
                     model_clone, plugin, m_config.get_context_for_tp()[i].as<RemoteContextImpl::Ptr>(), configs_for_tp[i], m_sub_memory_manager));
                 GPU_DEBUG_TRACE_DETAIL << "sub models for TP created, rank " << configs_for_tp[i].streamsRankTable[i][0] << std::endl;
@@ -151,17 +148,21 @@ CompiledModel::CompiledModel(cldnn::BinaryInputBuffer& ib,
                              const std::shared_ptr<const ov::IPlugin>& plugin,
                              RemoteContextImpl::Ptr context,
                              const ExecutionConfig& config,
-                             const bool loaded_from_cache)
-    : ov::ICompiledModel(nullptr,
-                         plugin,
-                         context,
-                         create_task_executor(plugin, config),
-                         nullptr)
-    , m_context(context)
-    , m_config(config)
-    , m_wait_executor(std::make_shared<ov::threading::CPUStreamsExecutor>(ov::threading::IStreamsExecutor::Config{"Intel GPU plugin wait executor"}))
-    , m_model_name("")
-    , m_loaded_from_cache(loaded_from_cache) {
+                             const bool loaded_from_cache,
+                             const std::shared_ptr<SubMemoryManager> sub_memory_manager)
+    : ov::ICompiledModel(nullptr, plugin, context, create_task_executor(plugin, config), nullptr),
+      m_context(context),
+      m_config(config),
+      m_wait_executor(std::make_shared<ov::threading::CPUStreamsExecutor>(
+          ov::threading::IStreamsExecutor::Config{"Intel GPU plugin wait executor"})),
+      m_model_name(""),
+      m_loaded_from_cache(loaded_from_cache) {
+    std::size_t num_sub_compiled_models = 0;
+    if (!sub_memory_manager) {
+        ib >> num_sub_compiled_models;
+        std::cout << "[" << __FILE__ << ":" << __LINE__
+            << "] [WY-DEBUG]: Number of sub compiled models: " << num_sub_compiled_models << std::endl;
+    }
     {
         size_t num_params;
         ib >> num_params;
@@ -235,10 +236,83 @@ CompiledModel::CompiledModel(cldnn::BinaryInputBuffer& ib,
         }
     }
 
-    auto graph_base = std::make_shared<Graph>(ib, context, m_config, 0);
-    for (uint16_t n = 0; n < m_config.get_property(ov::num_streams); n++) {
-        auto graph = n == 0 ? graph_base : std::make_shared<Graph>(graph_base, n);
-        m_graphs.push_back(graph);
+    std::shared_ptr<Graph> graph_base =
+        num_sub_compiled_models > 1 ? nullptr : std::make_shared<Graph>(ib, context, m_config, 0, sub_memory_manager);
+    auto get_rank_table = [&]() {
+        std::vector<std::vector<int>> rank_table = {};
+        for (size_t i = 0; i < num_sub_compiled_models; i++) {
+            std::vector<int> init_rank = {};
+            init_rank.emplace_back(i);
+            rank_table.emplace_back(init_rank);
+        }
+        return rank_table;
+    };
+    // for (auto& device_id : devices_id_for_tp) {
+    //     config.register_device_context_for_tp(get_default_context(device_id));
+    //     contexts_for_tp.insert({device_id, get_default_context(device_id)});
+    //     std::cout << "Registered device with id GPU." << device_id << " for TP." << std::endl;
+    // }
+    if (num_sub_compiled_models > 1) {
+        for (std::size_t id = 0; id < num_sub_compiled_models; id++) {
+            auto device_id = std::to_string(id + 1);
+            m_config.register_device_context_for_tp(context);
+            std::cout << "Registered device with id GPU." << device_id << " for TP." << std::endl;
+        }
+        m_config.enableSubStreams = true;
+        m_config.streamsRankTable = get_rank_table();
+        m_graphs.push_back(graph_base);
+        std::vector<ExecutionConfig> configs_for_tp;
+        configs_for_tp.resize(num_sub_compiled_models);
+        m_has_sub_compiled_models = true;
+        auto message = ov::threading::message_manager();
+        auto tp_compile_executor =
+            get_plugin()->get_executor_manager()->get_idle_cpu_streams_executor(ov::threading::IStreamsExecutor::Config{
+                "async compile executor for TP",
+                static_cast<int>(std::thread::hardware_concurrency()) /* max possible #streams*/,
+                0});
+        m_sub_memory_manager = std::make_shared<SubMemoryManager>(num_sub_compiled_models);
+        message->set_num_sub_streams(num_sub_compiled_models);
+        std::vector<std::shared_ptr<ov::ICompiledModel>> sub_models;
+        std::vector<ov::threading::Task> sub_tasks;
+        for (size_t i = 0; i < num_sub_compiled_models; i++) {
+            auto compile_tp_model = [&](size_t i) {
+                configs_for_tp[i] = m_config;
+                configs_for_tp[i].enableSubStreams = false;
+                auto streamExecutorConfig =
+                    ov::threading::IStreamsExecutor::Config{"GPUStreamsExecutor",
+                                                            1,
+                                                            0,
+                                                            ov::hint::SchedulingCoreType::ANY_CORE,
+                                                            false,
+                                                            false,
+                                                            {},
+                                                            configs_for_tp[i].streamsRankTable[i]};
+                configs_for_tp[i].subStreamExecConfig = std::move(streamExecutorConfig);
+                m_sub_compiled_models.push_back(
+                    std::make_shared<CompiledModel>(ib,
+                                                    plugin,
+                                                    m_config.get_context_for_tp()[i].as<RemoteContextImpl::Ptr>(),
+                                                    configs_for_tp[i],
+                                                    loaded_from_cache,
+                                                    m_sub_memory_manager));
+                GPU_DEBUG_TRACE_DETAIL << "sub models for TP created, rank " << configs_for_tp[i].streamsRankTable[i][0]
+                                       << std::endl;
+                std::cout << "[" << __FILE__ << ":" << __LINE__ << "] [WY-DEBUG]: compiled sub models from cache: " << i
+                          << std::endl;
+            };
+            sub_tasks.push_back(std::bind(compile_tp_model, i));
+        }
+        for (auto& iter : sub_tasks)
+            tp_compile_executor->run_and_wait({std::move(iter)});
+
+        // clear up the tp executor for async compile
+        get_plugin()->get_executor_manager()->clear("async compile executor for TP");
+        tp_compile_executor.reset();
+    } else {
+        for (uint16_t n = 0; n < m_config.get_property(ov::num_streams); n++) {
+            auto graph = n == 0 ? graph_base : std::make_shared<Graph>(graph_base, n);
+            m_graphs.push_back(graph);
+        }
     }
 }
 
@@ -271,47 +345,58 @@ void CompiledModel::export_model(std::ostream& model) const {
     OPENVINO_ASSERT(!m_graphs.empty(), "[GPU] Model not loaded");
 
     cldnn::BinaryOutputBuffer ob(model);
+    ob << m_sub_compiled_models.size();
 
-    // Inputs
-    {
-        const auto& params = inputs();
-        ob << params.size();
+    auto export_inputs_outputs = [&]() {
+        // Inputs
+        {
+            const auto& params = inputs();
+            ob << params.size();
 
-        for (const auto& param : params) {
-            std::stringstream ss;
-            ss << param.get_element_type();
+            for (const auto& param : params) {
+                std::stringstream ss;
+                ss << param.get_element_type();
 
-            ob << param.get_node()->get_friendly_name();
-            ob << ss.str();
-            ob << param.get_partial_shape();
-            ob << param.get_names().size();
-            for (const auto& name : param.get_names()) {
-                ob << name;
+                ob << param.get_node()->get_friendly_name();
+                ob << ss.str();
+                ob << param.get_partial_shape();
+                ob << param.get_names().size();
+                for (const auto& name : param.get_names()) {
+                    ob << name;
+                }
             }
         }
-    }
 
-    // Outputs
-    {
-        const auto& results = outputs();
-        ob << results.size();
+        // Outputs
+        {
+            const auto& results = outputs();
+            ob << results.size();
 
-        for (const auto& param : results) {
-            std::stringstream ss;
-            ss << param.get_element_type();
+            for (const auto& param : results) {
+                std::stringstream ss;
+                ss << param.get_element_type();
 
-            ob << ss.str();
-            ob << param.get_partial_shape();
-            ob << param.get_node()->get_input_node_ptr(0)->get_friendly_name();
-            ob << param.get_node()->get_friendly_name();
-            ob << param.get_names().size();
-            for (const auto& name : param.get_names()) {
-                ob << name;
+                ob << ss.str();
+                ob << param.get_partial_shape();
+                ob << param.get_node()->get_input_node_ptr(0)->get_friendly_name();
+                ob << param.get_node()->get_friendly_name();
+                ob << param.get_names().size();
+                for (const auto& name : param.get_names()) {
+                    ob << name;
+                }
             }
         }
-    }
+    };
+    std::cout << "[" << __FILE__ << ":" << __LINE__ << "] [WY-DEBUG]: caching warp model...\n";
+    export_inputs_outputs();
+    if (!m_has_sub_compiled_models)
+        m_graphs[0]->export_model(ob);
 
-    get_graph(0)->export_model(ob);
+    for (std::size_t index = 0; index < m_sub_compiled_models.size(); index++) {
+        std::cout << "[" << __FILE__ << ":" << __LINE__ << "] [WY-DEBUG]: caching sub model: " << index << std::endl;
+        export_inputs_outputs();
+        m_sub_compiled_models.at(index)->get_graph(0)->export_model(ob);
+    }
 }
 
 CompiledModel::Ptr CompiledModel::get_tp_compiled_model() const {
@@ -395,7 +480,7 @@ std::shared_ptr<ov::ISyncInferRequest> CompiledModel::create_sync_infer_request(
     OPENVINO_ASSERT(!m_graphs.empty(), "[GPU] Model not loaded");
 
     for (auto& graph : m_graphs) {
-        OPENVINO_ASSERT(graph != nullptr, "[GPU] Model not loaded: graph is nullptr");
+        //OPENVINO_ASSERT(graph != nullptr && m_config.enableSubStreams, "[GPU] Model not loaded: graph is nullptr");
         if (!m_config.enableSubStreams)
             OPENVINO_ASSERT(graph->is_loaded(), "[GPU] Model not loaded: invalid graph");
     }
