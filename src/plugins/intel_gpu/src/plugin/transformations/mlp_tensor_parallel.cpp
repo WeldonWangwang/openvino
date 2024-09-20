@@ -107,7 +107,8 @@ MLPTensorParallelFusion::MLPTensorParallelFusion(size_t world_size, size_t world
                 auto compressed_fc = std::dynamic_pointer_cast<op::FullyConnectedCompressed>(org_fc);
                 if (compressed_fc) {
                     auto ngroups = compressed_fc->get_input_node_shared_ptr(3)->get_output_partial_shape(0)[1].get_length();
-                    group_size = ifm / ngroups;
+                    if (ngroups > 1)
+                        group_size = ifm / ngroups;
                 }
                 std::vector<int64_t> part_fraction = {1, 1, 1};
                 auto ranked_weight = std::make_shared<ov::intel_gpu::op::RankConstant>(weight_node, world_size, world_rank, tp_mode, part_fraction, group_size);
