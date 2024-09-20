@@ -80,12 +80,10 @@ RemainFCParallelFusion::RemainFCParallelFusion(size_t world_size, size_t world_r
             {
                 // transform to rank constant
                 auto group_size = 1;
-                std::cout << weight_node->get_output_partial_shape(0).to_string() << std::endl;
                 auto ifm = weight_node->get_output_partial_shape(0)[1].get_length();
                 auto compressed_fc = std::dynamic_pointer_cast<op::FullyConnectedCompressed>(org_fc);
                 if (compressed_fc) {
                     auto ngroups = compressed_fc->get_input_node_shared_ptr(3)->get_output_partial_shape(0)[1].get_length();
-                    std::cout << compressed_fc->get_input_node_shared_ptr(3)->get_output_partial_shape(0).to_string() << std::endl;
                     if (ngroups > 1)
                         group_size = ifm / ngroups;
                 }
