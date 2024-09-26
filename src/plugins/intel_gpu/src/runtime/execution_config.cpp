@@ -47,6 +47,7 @@ void ExecutionConfig::set_default() {
         std::make_tuple(ov::hint::num_requests, 0),
         std::make_tuple(ov::hint::enable_cpu_pinning, false),
         std::make_tuple(ov::hint::dynamic_quantization_group_size, 0),
+        std::make_tuple(ov::device::priorities, ""), // temporarily used for TP
 
         std::make_tuple(ov::intel_gpu::hint::host_task_priority, ov::hint::Priority::MEDIUM),
         std::make_tuple(ov::intel_gpu::hint::queue_throttle, ov::intel_gpu::hint::ThrottleLevel::MEDIUM),
@@ -57,6 +58,7 @@ void ExecutionConfig::set_default() {
         std::make_tuple(ov::internal::exclusive_async_requests, false),
         std::make_tuple(ov::internal::query_model_ratio, 1.0f),
         std::make_tuple(ov::cache_mode, ov::CacheMode::OPTIMIZE_SPEED),
+        std::make_tuple(ov::hint::model_distribution_policy, ""),
         std::make_tuple(ov::cache_encryption_callbacks, EncryptionCallbacks{}),
         std::make_tuple(ov::hint::dynamic_quantization_group_size, 0),
         std::make_tuple(ov::intel_gpu::hint::enable_kernels_reuse, false),

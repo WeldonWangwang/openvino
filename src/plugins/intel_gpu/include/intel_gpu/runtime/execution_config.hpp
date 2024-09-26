@@ -6,6 +6,7 @@
 
 #include "intel_gpu/runtime/internal_properties.hpp"
 #include "intel_gpu/runtime/device.hpp"
+#include "openvino/runtime/threading/istreams_executor.hpp"
 
 namespace ov {
 namespace intel_gpu {
@@ -75,6 +76,15 @@ public:
     template <PropertyVisibility visibility, typename... PropertyInitializer, typename std::enable_if<(sizeof...(PropertyInitializer) == 0), bool>::type = true>
     void register_property_impl() { }
 
+    template <PropertyVisibility visibility, typename ValueT, typename... PropertyInitializer>
+    void register_property_impl(const std::tuple<ov::device::Priorities, ValueT>& property,
+                                PropertyInitializer&&... properties) {
+        auto p = std::get<0>(property)(std::get<1>(property));
+        auto v = std::dynamic_pointer_cast<BaseValidator>(std::make_shared<PropertyTypeValidator<std::string>>());
+        register_property_impl(std::move(p), visibility, std::move(v));
+        register_property_impl<visibility>(properties...);
+    }
+
     template <PropertyVisibility visibility, typename T,  PropertyMutability mutability, typename ValueT, typename... PropertyInitializer>
     void register_property_impl(const std::tuple<ov::Property<T, mutability>, ValueT>& property, PropertyInitializer&&... properties) {
         auto p = std::get<0>(property)(std::get<1>(property));
@@ -137,8 +147,12 @@ public:
     }
 
     void apply_user_properties(const cldnn::device_info& info);
-
+    void register_device_context_for_tp(const ov::Any context) { device_world_contexts.push_back(context);}
+    ov::AnyVector get_context_for_tp() const { return device_world_contexts; }
     std::string to_string() const;
+    bool enableSubStreams = false;
+    ov::threading::IStreamsExecutor::Config subStreamExecConfig;
+    std::vector<std::vector<int>> streamsRankTable;
 
 protected:
     void apply_hints(const cldnn::device_info& info);
@@ -151,8 +165,10 @@ private:
     ov::AnyMap internal_properties;
     ov::AnyMap user_properties;
 
+
     std::map<std::string, PropertyVisibility> supported_properties;
     std::map<std::string, BaseValidator::Ptr> property_validators;
+    ov::AnyVector device_world_contexts;
 };
 
 }  // namespace intel_gpu

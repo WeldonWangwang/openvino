@@ -651,4 +651,3 @@ void SyncInferRequest::sub_streams_infer() {
 
 }   // namespace intel_cpu
 }   // namespace ov
-

@@ -19,7 +19,21 @@
 
 #include "intel_gpu/runtime/compilation_context.hpp"
 #include "fully_connected_inst.h"
-
+#include "openvino/core/node.hpp"
+#include "openvino/runtime/profiling_info.hpp"
+#include "openvino/op/parameter.hpp"
+#include "openvino/op/op.hpp"
+#include "openvino/op/constant.hpp"
+#include "openvino/op/convert.hpp"
+#include "openvino/op/subtract.hpp"
+#include "openvino/op/multiply.hpp"
+#include "intel_gpu/op/placeholder.hpp"
+#include "intel_gpu/op/fully_connected.hpp"
+#include "intel_gpu/op/fully_connected_compressed.hpp"
+#include "openvino/op/relu.hpp"
+#include "openvino/openvino.hpp"
+#include "common_test_utils/ov_tensor_utils.hpp"
+#include "common_test_utils/data_utils.hpp"
 #include <cmath>
 
 using namespace cldnn;
@@ -2172,6 +2186,44 @@ public:
         }
     }
 
+    void test_compressed_scale_zp_nobias_activation(bool is_caching_test) {
+        std::cout << "[+] test_compressed_scale_zp_nobias_activation is_caching_test: " << is_caching_test << std::endl;
+
+        auto input1 = std::make_shared<ov::op::v0::Parameter>(ov::element::f32, ov::PartialShape{-1, 2});
+        std::vector<uint8_t> weights_values = {1, 2, 3, 4};
+        auto weights_const = ov::op::v0::Constant::create(ov::element::u8, ov::Shape{2, 2}, weights_values);
+        auto convert = std::make_shared<ov::op::v0::Convert>(weights_const, ov::element::f32);
+        std::vector<float> zp_value = {2.0f, 3.0f};
+        auto zp_const = ov::op::v0::Constant::create(ov::element::f32, ov::Shape{2, 1}, zp_value);
+        auto sub = std::make_shared<ov::op::v1::Subtract>(convert, zp_const);
+        std::vector<float> scale_value = {2.0f, 4.0f};
+        auto scale_const = ov::op::v0::Constant::create(ov::element::f32, ov::Shape{2, 1}, scale_value);
+        auto scale = std::make_shared<ov::op::v1::Multiply>(sub, scale_const);
+        auto no_bias = std::make_shared<ov::intel_gpu::op::Placeholder>();
+        // auto bias = ov::op::v0::Constant::create(ov::element::u8, ov::Shape{ 1, 2 }, {1});
+        auto fc = std::make_shared<ov::intel_gpu::op::FullyConnected>(input1, scale, no_bias);
+        const auto relu = std::make_shared<ov::op::v0::Relu>(fc);
+        auto model = std::make_shared<ov::Model>(ov::NodeVector{relu}, ov::ParameterVector{input1});
+        ov::Core core;
+
+        std::cout << "[+] test_compressed_scale_zp_nobias_activation compiled_model GPU " << std::endl;
+        ov::CompiledModel compiled_model =
+            core.compile_model(model, "GPU", {{"MODEL_DISTRIBUTION_POLICY", "TENSOR_PARALLEL"}});
+        ov::InferRequest infer_request = compiled_model.create_infer_request();
+        auto input_generate = ov::test::utils::InputGenerateData(1, 1);
+        auto tensor = ov::test::utils::create_and_fill_tensor(infer_request.get_input_tensor().get_element_type(),
+                                                              ov::Shape{{1, 2}},
+                                                              input_generate);
+        infer_request.set_input_tensor(tensor);
+        std::cout << "infer_request infer " << std::endl;
+        infer_request.infer();
+        const ov::Tensor& output_tensor = infer_request.get_output_tensor();
+        for (size_t i = 0; i < 2; i++) {
+            std::cout << "output_tensor[" << i << "] " << output_tensor.data<float>()[i] << std::endl;
+            std::cout << output_tensor.data<float>()[i] << std::endl;
+        }
+    }
+
     void test_dynamic_multi_inference_same_shape(bool is_caching_test) {
         auto& engine = get_test_engine();
         const int32_t input_f = 3, input_b = 1, weight_b = 4;
@@ -2540,7 +2592,8 @@ public:
     }
 
     void test_compressed_int4_scale_dyn_quan_weight_i4(bool is_dynamic, int batch = 1, int ifm = 512, int ofm = 2048,
-                                                        int quantize_group_size = 32, int scales_group_size = 128) {
+                                                        int quantize_group_size = 32, int scales_group_size = 128,
+                                                        bool is_wzp_test = false, bool is_wzp_scalar = false) {
         tests::random_generator rg(GET_SUITE_NAME);
         auto& engine = get_test_engine();
 
@@ -2550,12 +2603,15 @@ public:
         long int batch_num = batch;
         long int ifm_num = ifm;
         long int ofm_num = ofm;
+        long int wzp_num = is_wzp_scalar ? 1 : ofm_num;
 
         auto input_ps = ov::PartialShape{ batch_num, 1, ifm_num };
         auto input_mem = engine.allocate_memory({ input_ps, data_types::f16, format::bfyx });
 
         auto weights_mem = engine.allocate_memory({ {ofm_num, ifm_num}, data_types::i4, format::bfyx });
         auto scale_mem = engine.allocate_memory({ {ofm_num, ifm_num / scales_group_size}, data_types::f16, format::fbyx });
+        auto dcomp_zp_mem = engine.allocate_memory({ {wzp_num, 1}, data_types::u8, format::bfyx });
+
 
         auto input_data = rg.generate_random_1d<ov::float16>(batch_num * ifm_num, -2.f, 2.f);
         set_values(input_mem, input_data);
@@ -2566,20 +2622,30 @@ public:
         auto scale_data = rg.generate_random_1d<ov::float16>(ofm_num * ifm_num / scales_group_size, -2.f, 2.f);
         set_values(scale_mem, scale_data);
 
+        if (is_wzp_test) {
+            auto zp_data = rg.generate_random_1d<uint8_t>(wzp_num, 0, 2);
+            set_values(dcomp_zp_mem, zp_data);
+        }
+
         auto in_layout = is_dynamic ? layout{ ov::PartialShape{ -1, -1, -1 }, data_types::f16, format::bfyx }
                                     : layout{ input_ps, data_types::f16, format::bfyx };
 
-        auto fc_prim = fully_connected("fc_prim", input_info("input"), "weights", "", "scale", "", data_types::f16, 3, 2);
-        fc_prim.decompression_zero_point_scalar = 0;
+        auto dcomp_zp_name = is_wzp_test ? "wzp" : "";
+        auto fc_prim = fully_connected("fc_prim", input_info("input"), "weights", "", "scale", dcomp_zp_name, data_types::f16, 3, 2);
+
+        if (is_wzp_test) {
+            fc_prim.compressed_weights = true;
+            fc_prim.decompression_zero_point = is_wzp_test ? "wzp" : "";
+        }
 
         // Implemented dynamic quantize kernel
         auto get_ref_results = [&]() {
-            topology topology(
-                input_layout("input", in_layout),
-                data("weights", weights_mem),
-                data("scale", scale_mem),
-                fc_prim
-            );
+            topology topo;
+            topo.add(input_layout("input", in_layout));
+            topo.add(data("weights", weights_mem));
+            topo.add(data("scale", scale_mem));
+            topo.add(data("wzp", dcomp_zp_mem));
+            topo.add(fc_prim);
 
             auto config = get_test_default_config(engine);
             config.set_property(ov::intel_gpu::allow_new_shape_infer(true));
@@ -2587,7 +2653,7 @@ public:
             config.set_property(ov::intel_gpu::force_implementations(ov::intel_gpu::ImplForcingMap{ {"fc_prim", fc_impl_desc} }));
             config.set_property(ov::hint::dynamic_quantization_group_size(0));
 
-            network network(engine, topology, config);
+            network network(engine, topo, config);
             network.set_input_data("input", input_mem);
 
             auto outputs = network.execute();
@@ -2604,6 +2670,7 @@ public:
             input_layout("input", in_layout),
             data("weights", weights_mem),
             data("scale", scale_mem),
+            data("wzp", dcomp_zp_mem),
             fc_prim
         );
 
@@ -3699,6 +3766,26 @@ TEST_F(fully_connected_gpu_tests, compressed_int4_scale_dynamic_quantize_edge_ca
     this->test_compressed_int4_scale_dyn_quan_weight_i4(true, 359, 1536, 2560, 128, 64);
 }
 
+TEST_F(fully_connected_gpu_tests, compressed_int4_scale_dynamic_quantize_no_wzp) {
+    this->test_compressed_int4_scale_dyn_quan_weight_i4(true, 320, 1024, 1024, 32, 32, false);
+}
+
+TEST_F(fully_connected_gpu_tests, compressed_int4_scale_dynamic_quantize_wzp) {
+    this->test_compressed_int4_scale_dyn_quan_weight_i4(true, 320, 1024, 1024, 32, 32, true);
+}
+
+TEST_F(fully_connected_gpu_tests, compressed_int4_scale_dynamic_quantize_wzp_scalar) {
+    this->test_compressed_int4_scale_dyn_quan_weight_i4(true, 320, 1024, 1024, 32, 32, true);
+}
+
+TEST_F(fully_connected_gpu_tests, compressed_int4_scale_dynamic_quantize_wzp_128) {
+    this->test_compressed_int4_scale_dyn_quan_weight_i4(true, 320, 1024, 1024, 128, 128, true);
+}
+
+TEST_F(fully_connected_gpu_tests, compressed_int4_scale_dynamic_quantize_wzp_static) {
+    this->test_compressed_int4_scale_dyn_quan_weight_i4(false, 320, 1024, 1024, 32, 32, true);
+}
+
 TEST_F(fully_connected_gpu_tests, compressed_scale_bias) {
     this->test_compressed_scale_bias(false);
 }
@@ -3778,6 +3865,10 @@ TEST_F(fully_connected_gpu_tests, static_6d_input_cached) {
 
 TEST_F(fully_connected_gpu_tests, dynamic_multi_inference_same_shape) {
     this->test_dynamic_multi_inference_same_shape(false);
+}
+
+TEST_F(fully_connected_gpu_tests, compressed_scale_zp_nobias_activation) {
+    this->test_compressed_scale_zp_nobias_activation(false);
 }
 
 TEST_F(fully_connected_gpu_tests, dynamic_multi_inference_same_shape_cached) {

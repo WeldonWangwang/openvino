@@ -10,6 +10,7 @@
 #include <string>
 
 #include "pyopenvino/core/common.hpp"
+#include "pyopenvino/core/remote_tensor.hpp"
 #include "pyopenvino/utils/utils.hpp"
 
 namespace py = pybind11;
@@ -221,6 +222,7 @@ void regclass_InferRequest(py::module m) {
     cls.def(
         "start_async",
         [](InferRequestWrapper& self, const ov::Tensor& inputs, py::object& userdata) {
+            std::cout << "start_async [1]\n";
             // Update inputs if there are any
             self.m_request->set_input_tensor(inputs);
             if (!userdata.is(py::none())) {
@@ -306,7 +308,7 @@ void regclass_InferRequest(py::module m) {
             self.m_request->wait();
         },
         R"(
-            Waits for the result to become available. 
+            Waits for the result to become available.
             Blocks until the result becomes available.
 
             GIL is released while running this function.
@@ -464,10 +466,27 @@ void regclass_InferRequest(py::module m) {
         },
         R"(
             Gets output tensor of InferRequest.
-            
+
             :return: An output Tensor for the model.
                      If model has several outputs, an exception is thrown.
             :rtype: openvino.runtime.Tensor
+        )");
+
+    cls.def(
+        "set_tensor",
+        [](InferRequestWrapper& self, const std::string& name, const RemoteTensorWrapper& tensor) {
+            self.m_request->set_tensor(name, tensor.tensor);
+        },
+        py::arg("name"),
+        py::arg("tensor"),
+        R"(
+            Sets input/output tensor of InferRequest.
+
+            :param name: Name of input/output tensor.
+            :type name: str
+            :param tensor: RemoteTensor object. The element_type and shape of a tensor
+                           must match the model's input/output element_type and shape.
+            :type tensor: openvino.runtime.RemoteTensor
         )");
 
     cls.def(
@@ -677,7 +696,7 @@ void regclass_InferRequest(py::module m) {
                               &InferRequestWrapper::get_input_tensors,
                               R"(
                                 Gets all input tensors of this InferRequest.
-                                
+
                                 :rtype: List[openvino.runtime.Tensor]
                               )");
 
@@ -686,7 +705,7 @@ void regclass_InferRequest(py::module m) {
                               R"(
 
                                 Gets all output tensors of this InferRequest.
-                                
+
                                 :rtype: List[openvino.runtime.Tensor]
                               )");
 
@@ -697,7 +716,7 @@ void regclass_InferRequest(py::module m) {
         },
         R"(
             Gets latency of this InferRequest.
-            
+
             :rtype: float
         )");
 
@@ -712,7 +731,7 @@ void regclass_InferRequest(py::module m) {
             Not all plugins provide meaningful data!
 
             GIL is released while running this function.
-            
+
             :return: Inference time.
             :rtype: List[openvino.runtime.ProfilingInfo]
         )");

@@ -44,6 +44,7 @@ FullyConnectedHorizontalFusion::FullyConnectedHorizontalFusion() {
         const int min_num_fcs_to_fuse = 3;
         const int max_num_fcs_to_fuse = 3;
         const auto& fc = std::dynamic_pointer_cast<op::FullyConnectedCompressed>(output.get_node_shared_ptr());
+        // std::cout << "fc name: " << fc->get_friendly_name() << std::endl;
         const auto& input = fc->get_input_node_shared_ptr(0);
         if (!fc->get_input_partial_shape(0).is_dynamic())
             return false;
@@ -73,17 +74,19 @@ FullyConnectedHorizontalFusion::FullyConnectedHorizontalFusion() {
     };
 
     auto target_fc = wrap_type<op::FullyConnectedCompressed>(is_target_pattern);
-
+    // std::cout << "target fc name: " << target_fc->get_friendly_name() << std::endl;
     ov::matcher_pass_callback callback = [=](Matcher& m) {
         const auto& pattern_map = m.get_pattern_value_map();
         auto m_fc = pattern_map.at(target_fc).get_node_shared_ptr();
         auto input_node = m_fc->get_input_node_shared_ptr(0);
+        // std::cout << "target fc name: " << m_fc->get_friendly_name() << std::endl;
         std::vector<std::shared_ptr<op::FullyConnectedCompressed>> fc_nodes;
         ov::NodeVector fc_nodes_vec;
         ov::NodeVector weight_nodes;
         ov::NodeVector scale_nodes;
         ov::NodeVector bias_nodes;
         ov::NodeVector zp_nodes;
+        int32_t bias_rank = -1;
         for (auto user : input_node->get_users()) {
             auto fc_user = std::dynamic_pointer_cast<op::FullyConnectedCompressed>(user);
             if (fc_user) {
@@ -91,8 +94,13 @@ FullyConnectedHorizontalFusion::FullyConnectedHorizontalFusion() {
                 fc_nodes.push_back(fc_user);
                 fc_nodes_vec.push_back(fc_user);
                 weight_nodes.push_back(fc_user->get_input_node_shared_ptr(1));
-                if (!std::dynamic_pointer_cast<op::Placeholder>(fc_user->get_input_node_shared_ptr(2)))
+                if (!std::dynamic_pointer_cast<op::Placeholder>(fc_user->get_input_node_shared_ptr(2))) {
+                    if (bias_rank == -1)
+                        bias_rank = static_cast<int32_t>(fc_user->get_input_partial_shape(2).size());
+                    if (bias_rank != static_cast<int32_t>(fc_user->get_input_partial_shape(2).size()))
+                        return false;
                     bias_nodes.push_back(fc_user->get_input_node_shared_ptr(2));
+                }
                 scale_nodes.push_back(fc_user->get_input_node_shared_ptr(3));
                 if (fc_user->inputs().size() > 4)
                     zp_nodes.push_back(fc_user->get_input_node_shared_ptr(4));
@@ -131,39 +139,41 @@ FullyConnectedHorizontalFusion::FullyConnectedHorizontalFusion() {
         auto fused_scale = std::make_shared<ov::op::v0::Concat>(scales_as_output_vector, 0);
         fused_scale->set_friendly_name(scale_nodes[0]->get_friendly_name() + "_fused_scale");
         ov::copy_runtime_info(scale_nodes, fused_scale);
-        // check if all of the fc has a bias user, set it as bias input
+        // check if the FCs do not have bias inputs, but all of the fc has a bias add user, set them as bias inputs
+        // Currently horizontal fusing is applied only when fusing is applied for N dim
+        // Also, fuse biases for the last dimension too, if
+        // - Biases are constant
+        // - Rank of the bias shapes are same
+        // - all other dims except last dim is 1 (e.g., [1, 1, N])
         size_t n_bias_users = 0;
-        for (auto fc : fc_nodes) {
-            if (fc->get_users().size() == 1
-                && fc->get_users()[0]->get_type_info() == ov::opset1::Add::get_type_info_static()
-                && ov::is_type<ov::op::v0::Constant>(fc->get_users()[0]->inputs()[1].get_source_output().get_node())) {
+        if (bias_nodes.empty()) {
+            for (auto fc : fc_nodes) {
+                if (fc->get_users().size() == 1 &&
+                    fc->get_users()[0]->get_type_info() == ov::opset1::Add::get_type_info_static() &&
+                    ov::is_type<ov::op::v0::Constant>(fc->get_users()[0]->inputs()[1].get_source_output().get_node())) {
+                    auto bias_input1_shape = fc->get_users()[0]->get_input_partial_shape(1).get_shape();
+                    if (bias_rank == -1)
+                        bias_rank = static_cast<int32_t>(bias_input1_shape.size());
+                    if (bias_rank != static_cast<int32_t>(bias_input1_shape.size()))
+                        break;
+                    size_t ndim_size = bias_input1_shape.back();
+                    // allow only [1, 1, N] shape bias
+                    if (std::accumulate(bias_input1_shape.begin(),
+                                        bias_input1_shape.end(),
+                                        static_cast<size_t>(1),
+                                        std::multiplies<size_t>()) != ndim_size)
+                        break;
                     n_bias_users++;
+                }
             }
-        }
 
-        size_t bias_concat_axis = 0;
-        if (bias_nodes.empty() && n_bias_users == fc_nodes.size()) {
-            // Set Add user as bias input to FC
-            for (size_t i = 0; i < fc_nodes.size(); ++i) {
-                auto orig_fc = fc_nodes[i];
-                auto bias_node = orig_fc->get_users()[0];
-                auto bias_const_ptr = orig_fc->get_users()[0]->get_input_node_shared_ptr(1);
-                bias_nodes.push_back(bias_const_ptr);
-            }
-            // Check shape and find axis
-            const auto bias_rank = bias_nodes[0]->get_output_partial_shape(0).size();
-            size_t non_zero_diffs = 0;
-            for (size_t i = 0; i < bias_rank; ++i) {
-                std::unordered_set<size_t> dims;
-                for (size_t j = 0; j < bias_nodes.size(); ++j) {
-                    dims.insert(bias_nodes[j]->get_output_partial_shape(0)[i].get_length());
+            if (n_bias_users == fc_nodes.size()) {
+                for (size_t i = 0; i < fc_nodes.size(); ++i) {
+                    auto orig_fc = fc_nodes[i];
+                    auto bias_node = orig_fc->get_users()[0];
+                    auto bias_const_ptr = orig_fc->get_users()[0]->get_input_node_shared_ptr(1);
+                    bias_nodes.push_back(bias_const_ptr);
                 }
-                if (dims.size() > 1) {
-                    bias_concat_axis = i;
-                    non_zero_diffs++;
-                }
-            }
-            if (non_zero_diffs <= 1) {
                 for (size_t i = 0; i < fc_nodes.size(); ++i) {
                     auto orig_fc = fc_nodes[i];
                     auto bias_node = orig_fc->get_users()[0];
@@ -187,18 +197,16 @@ FullyConnectedHorizontalFusion::FullyConnectedHorizontalFusion() {
                     bias_node->clear_control_dependencies();
                     orig_fc->clear_control_dependencies();
                 }
-            } else {
-                // biases cannot be fusable. Not to set users as bias input
-                bias_nodes.clear();
             }
         }
+
         std::shared_ptr<ov::Node> fused_bias;
         if (bias_nodes.size() == fc_nodes.size()) {
             ov::OutputVector bias_nodes_as_output_vector;
             for (size_t i = 0; i < bias_nodes.size(); ++i) {
                 bias_nodes_as_output_vector.push_back(bias_nodes[i]);
             }
-            fused_bias = std::make_shared<ov::op::v0::Concat>(bias_nodes_as_output_vector, bias_concat_axis);
+            fused_bias = std::make_shared<ov::op::v0::Concat>(bias_nodes_as_output_vector, bias_rank - 1);
             fused_bias->set_friendly_name(bias_nodes[0]->get_friendly_name() + "_fused_bias");
             ov::copy_runtime_info(bias_nodes, fused_bias);
         } else {
@@ -269,6 +277,11 @@ FullyConnectedHorizontalFusion::FullyConnectedHorizontalFusion() {
         copy_runtime_info(fc_nodes_vec, new_fc);
 
         // Split output and connect to the orig users
+        // std::cout << "orig_n_sizes: ";
+        // for (auto& item : orig_n_sizes) {
+        //     std::cout << item << " ";
+        // }
+        // std::cout << std::endl;
         auto split_name = fc_nodes[0]->get_friendly_name() + "_split";
         auto axis_const = ov::op::v0::Constant::create(ov::element::i64, ov::Shape{1}, {new_fc->get_output_partial_shape(0).size() - 1});
         auto split_size = fc_nodes.size();

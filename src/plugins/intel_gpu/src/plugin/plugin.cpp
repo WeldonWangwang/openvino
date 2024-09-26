@@ -25,6 +25,7 @@
 #include "intel_gpu/runtime/device_query.hpp"
 #include "intel_gpu/runtime/execution_config.hpp"
 #include "intel_gpu/runtime/itt.hpp"
+#include "intel_gpu/plugin/tuple_remote_tensor.hpp"
 #include "openvino/core/deprecated.hpp"
 #include "openvino/pass/manager.hpp"
 #include "openvino/pass/visualize_tree.hpp"
@@ -39,7 +40,6 @@
 #include "transformations/init_node_info.hpp"
 #include "transformations/rt_info/fused_names_attribute.hpp"
 #include "transformations/utils/utils.hpp"
-
 // Undef DEVICE_TYPE macro which can be defined somewhere in windows headers as DWORD and conflict with our metric
 #ifdef DEVICE_TYPE
 #undef DEVICE_TYPE
@@ -136,6 +136,8 @@ std::map<std::string, RemoteContextImpl::Ptr> Plugin::get_default_contexts() con
             auto ctx = std::make_shared<RemoteContextImpl>(get_device_name() + "." + device.first, std::vector<cldnn::device::ptr>{ device.second });
             m_default_contexts.insert({device.first, ctx});
         }
+        // auto ctx = std::make_shared<RemoteContextImpl>(get_device_name() + ".-1", std::vector<cldnn::device::ptr>{ nullptr });
+        // m_default_contexts.insert({"-1", ctx});
     });
     return m_default_contexts;
 }
@@ -151,7 +153,16 @@ Plugin::Plugin() {
     cldnn::device_query device_query(cldnn::engine_types::ocl, cldnn::runtime_types::ocl);
 #endif
     m_device_map = device_query.get_available_devices();
-
+    
+    // std::cout << "****************************\n";
+    // for (const auto& device : m_device_map) {
+    //      std::cout << "device.first: " << device.first << std::endl;
+    //      m_device_map["-1"] = m_device_map[device.first];
+    //      break;
+    // }
+    // for (const auto& device : m_device_map) {
+    //      std::cout << "device.first: " << device.first << std::endl;
+    // }
     // Set default configs for each device
     for (const auto& device : m_device_map) {
         m_configs_map.insert({device.first, ExecutionConfig(ov::device::id(device.first))});
@@ -160,6 +171,7 @@ Plugin::Plugin() {
     // Set common info for compiled_model_runtime_properties
     auto& ov_version = ov::get_openvino_version();
     m_compiled_model_runtime_properties["OV_VERSION"] = ov_version.buildNumber;
+    m_msg_manager = ov::threading::message_manager();
 }
 
 std::shared_ptr<ov::ICompiledModel> Plugin::compile_model(const std::shared_ptr<const ov::Model>& model, const ov::AnyMap& orig_config) const {
@@ -173,6 +185,113 @@ std::shared_ptr<ov::ICompiledModel> Plugin::compile_model(const std::shared_ptr<
     ExecutionConfig config = m_configs_map.at(device_id);
     config.set_user_property(orig_config);
     config.apply_user_properties(context->get_engine().get_device_info());
+    std::set<ov::hint::ModelDistributionPolicy> model_distribution_policy =
+        config.get_property(ov::hint::model_distribution_policy.name())
+            .as<std::set<ov::hint::ModelDistributionPolicy>>();
+
+    auto device_ptr = context->get_engine().get_device();
+
+    auto iter_devices_for_tp = orig_config.find(ov::device::priorities.name()) == orig_config.end();
+    std::string devices_for_tp =
+        iter_devices_for_tp ? "" : config.get_property(ov::device::priorities.name()).as<std::string>();
+    auto parse_devices_id = [&](const std::string devices_for_tp,
+                                const std::string delimiter = ",") -> std::vector<std::string> {
+        std::cout << "devices_for_tp: " << devices_for_tp << std::endl;
+        bool is_set_device_id = orig_config.find(ov::device::id.name()) != orig_config.end();
+        std::vector<std::string> ret;
+        if (is_set_device_id)
+            ret.push_back(device_id);
+        std::size_t start = 0, end = devices_for_tp.find(delimiter);
+        while (end != std::string::npos) {
+            std::string device_with_id = devices_for_tp.substr(start, end - start);
+            auto dotPos = device_with_id.find(".");
+            if (dotPos != std::string::npos) {
+                auto target_id = device_with_id.substr(dotPos + 1);
+                if (m_device_map.count(target_id) &&
+                    m_device_map.at(target_id)->get_info().dev_type == device_ptr->get_info().dev_type) {
+                    if (!is_set_device_id) {
+                        ret.push_back(target_id);
+                    } else if (target_id != device_id) {
+                        ret.push_back(target_id);
+                        return ret;
+                    }
+                } else {
+                    OPENVINO_THROW("Invalid device found for TP: ", device_with_id);
+                }
+            }
+            start = end + delimiter.length();
+            end = devices_for_tp.find(delimiter, start);
+        }
+        std::string last = devices_for_tp.substr(start);
+        auto dotPos = last.find(".");
+        if (dotPos != std::string::npos) {
+            auto target_id = last.substr(dotPos + 1);
+            if (m_device_map.count(target_id) &&
+                m_device_map.at(target_id)->get_info().dev_type == device_ptr->get_info().dev_type) {
+                if (!is_set_device_id) {
+                    ret.push_back(target_id);
+                } else if (target_id != device_id) {
+                    ret.push_back(target_id);
+                    return ret;
+                }
+            } else {
+                OPENVINO_THROW("Invalid device found for TP: ", last);
+            }
+        }
+        std::string target_device = is_set_device_id ? std::string("GPU.") + device_id : "GPU";
+        if (is_set_device_id) {
+            if (ret.size() < 4) {
+                OPENVINO_THROW("Invalid number of parsed device found for TP from specified device candidate list: ",
+                               devices_for_tp,
+                               " when compiling model to target device: ",
+                               target_device);
+            }
+        } else {
+            if (ret.empty()) {
+                OPENVINO_THROW("Invalid number of parsed device found for TP from specified device candidate list: ",
+                               devices_for_tp,
+                               " when compiling model to target device: ",
+                               target_device);
+            }
+            if (ret.size() == 1) {
+                auto id = ret.front();
+                if (id != device_id && device_ptr->get_info().dev_type == m_device_map.at(id)->get_info().dev_type) {
+                    ret.push_back(device_id);
+                } else {
+                    for (const auto& item : m_device_map) {
+                        if (item.first != id && item.second->get_info().dev_type == device_ptr->get_info().dev_type) {
+                            ret.push_back(item.first);
+                        }
+                    }
+                }
+            }
+        }
+        return ret;
+    };
+    if (!devices_for_tp.empty()) {
+        auto devices_id_for_tp = parse_devices_id(devices_for_tp);
+        auto get_rank_table = [&]() {
+            std::vector<std::vector<int>> rank_table = {};
+            for (size_t i = 0; i < config.get_context_for_tp().size(); i++) {
+                std::vector<int> init_rank = {};
+                init_rank.emplace_back(i);
+                rank_table.emplace_back(init_rank);
+            }
+            return rank_table;
+        };
+        if (devices_id_for_tp.size() > 1) {
+            for (auto& device_id : devices_id_for_tp) {
+                config.register_device_context_for_tp(get_default_context(device_id));
+                contexts_for_tp.insert({device_id, get_default_context(device_id)});
+                std::cout << "Registered device with id GPU." << device_id << " for TP." << std::endl;
+            }
+            if (config.get_context_for_tp().size() > 1) {
+                std::cout << "***************************** enable tp *****************************\n";
+                config.enableSubStreams = true;
+                config.streamsRankTable = get_rank_table();
+            }
+        }
+    }
 
     auto transformed_model = clone_and_transform_model(model, config, context);
     {
@@ -211,8 +330,12 @@ std::shared_ptr<RemoteContextImpl> Plugin::get_default_context(const std::string
 }
 
 ov::SoPtr<ov::IRemoteContext> Plugin::get_default_context(const AnyMap& params) const {
+    if (contexts_for_tp.size() > 1) {
+        // auto contexts = get_default_contexts();
+        auto tuple_context = std::make_shared<ov::intel_gpu::TupleRemoteContextImpl>(contexts_for_tp);
+        return tuple_context;
+    }
     std::string device_id = m_default_device_id;
-
     if (params.find(ov::device::id.name()) != params.end())
         device_id = params.at(ov::device::id.name()).as<std::string>();
 
@@ -441,6 +564,25 @@ ov::Any Plugin::get_metric(const std::string& name, const ov::AnyMap& options) c
     auto device_info = device->get_info();
 
     if (name == ov::intel_gpu::device_total_mem_size) {
+        if (contexts_for_tp.size() > 1) {
+            uint64_t min_global_mem_size_tp = 0;
+            for (auto context = contexts_for_tp.begin(); context != contexts_for_tp.end(); ++context) {
+                auto iter_tp = m_device_map.find(std::to_string(cldnn::device_query::device_id));
+                if (iter_tp == m_device_map.end())
+                    iter_tp = m_device_map.find(context->first);
+                if (iter_tp == m_device_map.end())
+                    iter_tp = m_device_map.begin();
+                auto global_mem_size = iter_tp->second->get_info().max_global_mem_size;
+                if (context == contexts_for_tp.begin()) {
+                    min_global_mem_size_tp =  global_mem_size;
+                } else {
+                    if (global_mem_size <  min_global_mem_size_tp) {
+                        min_global_mem_size_tp = global_mem_size;
+                    }
+                }
+            }
+            return decltype(ov::intel_gpu::device_total_mem_size)::value_type {min_global_mem_size_tp * contexts_for_tp.size()};;
+        }
         return decltype(ov::intel_gpu::device_total_mem_size)::value_type {device_info.max_global_mem_size};
     } else if (name == ov::device::type) {
         auto dev_type = device_info.dev_type == cldnn::device_type::discrete_gpu ? ov::device::Type::DISCRETE : ov::device::Type::INTEGRATED;
@@ -483,6 +625,24 @@ ov::Any Plugin::get_metric(const std::string& name, const ov::AnyMap& options) c
         std::tuple<unsigned int, unsigned int> range = std::make_tuple(1, device_info.num_ccs == 1 ? 2 : device_info.num_ccs);
         return decltype(ov::range_for_streams)::value_type {range};
     } else if (name == ov::intel_gpu::memory_statistics) {
+        if (contexts_for_tp.size() > 1) {
+            std::map<std::string, uint64_t> memory_statistics_tp;
+            for (auto& context : contexts_for_tp) {
+                for (auto& memory_statistics_item : context.second->get_engine().get_memory_statistics()) {
+                    if (memory_statistics_tp.find(memory_statistics_item.first) != memory_statistics_tp.end()) {
+                        if (memory_statistics_item.second > memory_statistics_tp[memory_statistics_item.first]) {
+                            memory_statistics_tp[memory_statistics_item.first] = memory_statistics_item.second;
+                        }
+                    } else {
+                        memory_statistics_tp.insert({memory_statistics_item.first, memory_statistics_item.second});
+                    }
+                }
+            }
+            for (auto& memory_item : memory_statistics_tp) {
+                memory_item.second *= contexts_for_tp.size();
+            }
+            return decltype(ov::intel_gpu::memory_statistics)::value_type {memory_statistics_tp};;
+        }
         const auto& ctx = get_default_context(device_id);
         return decltype(ov::intel_gpu::memory_statistics)::value_type {ctx->get_engine().get_memory_statistics()};
     } else if (name == ov::max_batch_size) {
@@ -562,7 +722,9 @@ std::vector<ov::PropertyName> Plugin::get_supported_properties() const {
         ov::PropertyName{ov::hint::inference_precision.name(), PropertyMutability::RW},
         ov::PropertyName{ov::hint::enable_cpu_pinning.name(), PropertyMutability::RW},
         ov::PropertyName{ov::device::id.name(), PropertyMutability::RW},
-        ov::PropertyName{ov::hint::dynamic_quantization_group_size.name(), PropertyMutability::RW}
+        ov::PropertyName{ov::hint::model_distribution_policy.name(), PropertyMutability::RW},
+        ov::PropertyName{ov::hint::dynamic_quantization_group_size.name(), PropertyMutability::RW},
+        ov::PropertyName{ov::device::priorities.name(), PropertyMutability::RW},
     };
 
     return supported_properties;

@@ -52,7 +52,7 @@ static int get_cl_map_type(mem_lock_type type) {
 gpu_buffer::gpu_buffer(ocl_engine* engine,
                        const layout& layout)
     : lockable_gpu_mem(), memory(engine, layout, allocation_type::cl_mem, nullptr)
-    , _buffer(engine->get_cl_context(), CL_MEM_READ_WRITE, size()) {
+    , _buffer(engine->get_cl_context(), CL_MEM_READ_WRITE, size() < 8192 ? 8192 : size()) {
     m_mem_tracker = std::make_shared<MemoryTracker>(engine, _buffer.get(), layout.bytes_count(), allocation_type::cl_mem);
 }
 
@@ -456,6 +456,7 @@ gpu_usm::gpu_usm(ocl_engine* engine, const layout& layout, allocation_type type)
     , memory(engine, layout, type, nullptr)
     , _buffer(engine->get_usm_helper())
     , _host_buffer(engine->get_usm_helper()) {
+    _bytes_count = _bytes_count == 0 ? 1 : _bytes_count;
     switch (get_allocation_type()) {
     case allocation_type::usm_host:
         _buffer.allocateHost(_bytes_count);
