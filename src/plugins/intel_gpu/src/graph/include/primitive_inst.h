@@ -222,6 +222,8 @@ public:
     memory::ptr shape_info_memory_ptr() const { return _shape_info_memory; }
 
     event::ptr execute(const std::vector<event::ptr>& events);
+    std::vector<event::ptr> get_dependencies(const std::vector<event::ptr>& events);
+    event::ptr run_execute(const std::vector<event::ptr>& dependencies);
     void init_kernels(const kernels_cache& kernels_cache) {
         _impl->init_kernels(kernels_cache, *_impl_params);
     }
@@ -327,6 +329,7 @@ protected:
     std::unique_ptr<kernel_impl_params> _impl_params;
     std::unique_ptr<primitive_impl> _impl;
     std::unique_ptr<primitive_impl> _dynamic_impl = nullptr;
+    event::ptr _temp_event = nullptr;
 
     // this is a set of dependencies in terms of memory, if execution of this primitive requires data from another one,
     // it should be added to this set

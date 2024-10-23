@@ -18,6 +18,7 @@
 #include "intel_gpu/runtime/shape_predictor.hpp"
 #include "intel_gpu/plugin/variable_state.hpp"
 #include "intel_gpu/plugin/sub_memory_manager.hpp"
+#include "tbb/parallel_pipeline.h"
 
 #include <map>
 #include <vector>
@@ -67,9 +68,19 @@ class ICompilationContext;
     int64_t extra_sync = 0;
     int64_t extra_copy = 0;
 };*/
+
+class prim_inst {
+public:
+    std::shared_ptr<primitive_inst> _exec_one;
+    std::vector<event::ptr> _dependencies;
+};
+
 struct network {
 public:
     using ptr = std::shared_ptr<network>;
+
+    int input_index = 0;
+    int output_index = 0;
 
     network(program::ptr program, stream::ptr stream, bool is_internal, bool is_primary_stream,
             ov::intel_gpu::SubMemoryManager::cptr sub_memory_manager = nullptr);
@@ -207,6 +218,8 @@ public:
     std::vector<std::pair<primitive_inst*, int>> get_primitives(const std::vector<std::pair<program_node*, int>>& nodes);
     void execute_primitive(const std::shared_ptr<primitive_inst>& primitive,
                            const std::vector<event::ptr>& events);
+    std::shared_ptr<prim_inst> get_dependencies(bool& end);
+    event::ptr run_execute(std::shared_ptr<prim_inst> prims);
     void allocate_primitives();
     void configure_primitives_second_output();
     void build_insts_deps();
@@ -235,6 +248,8 @@ public:
 
     std::shared_ptr<ShapePredictor> get_shape_predictor() { return _shape_predictor; }
     void set_shape_predictor(std::shared_ptr<ShapePredictor> shape_predictor) { _shape_predictor = shape_predictor; }
+
+    int run_pipeline(const std::vector<event::ptr>& events, int nthreads);
 
 #ifdef GPU_DEBUG_CONFIG
     int64_t get_current_iteration_num() { return iteration; }
@@ -278,6 +293,14 @@ private:
 
     std::shared_ptr<ShapePredictor> _shape_predictor;
     ov::intel_gpu::SubMemoryManager::ptr _sub_memory_manager;
+
+    std::vector<event::ptr> _in_events;
+    std::list<std::shared_ptr<primitive_inst>>::iterator _iterm;
+    int64_t curr_iter = -1;
+    size_t executed_prims;
+    size_t flush_frequency;
+    bool needs_flushing = false;
+
     void build_exec_order();
     void allocate_primitive_instance(program_node const& node);
     void transfer_memory_to_device(std::shared_ptr<primitive_inst> instance, program_node const& node);

@@ -56,6 +56,9 @@
 #include <map>
 #include <functional>
 #include <fstream>
+#include <unistd.h>
+#include <sys/types.h>
+#include <atomic>
 
 #ifdef GPU_DEBUG_CONFIG
 #include <iomanip>
@@ -64,6 +67,8 @@
 #include <chrono>
 #include <thread>
 #endif
+
+#define USE_PIPELINE 1
 
 namespace cldnn {
 
@@ -977,6 +982,7 @@ std::map<primitive_id, network_output> network::execute(const std::vector<event:
 
 void network::execute_impl(const std::vector<event::ptr>& events) {
     OV_ITT_SCOPED_TASK(ov::intel_gpu::itt::domains::intel_gpu_plugin, "NetworkImpl::Execute");
+    _in_events = events;
     int64_t curr_iter = -1;
     GPU_DEBUG_GET_INSTANCE(debug_config);
 #ifdef GPU_DEBUG_CONFIG
@@ -1055,20 +1061,34 @@ void network::execute_impl(const std::vector<event::ptr>& events) {
         }
         if (!is_internal()) exit(0);
     }
+    // auto get_iteration_prefix = [](int64_t iter) {
+    //     if (iter < 0)
+    //         return std::string("");
+    //     return std::to_string(iter) + "_";
+    // };
+
+    // This extra flush command is needed for dynamic models in both cases of out_of_order / in_order operating mode
+    // since it reduces `bubbles` number in pipeline and GPU's idle time by timely flushing new kernels to device.
+    // The freqency of flushing (16) is selected empirically, see details in tickets 116365, 116287, 139931.
+    std::map<std::string, std::vector<int64_t>> tp_host_times_each_iter;
+    const bool is_out_of_order_queue = get_stream().get_queue_type() == QueueTypes::out_of_order;
+    needs_flushing = _is_dynamic;
+    flush_frequency = needs_flushing ? 16 : 0;
+    executed_prims = 0;
+    _iterm = _exec_order.begin();
+#if USE_PIPELINE
+    input_index = 0;
+    output_index = 0;
+    run_pipeline(events, 2);
+#else
     auto get_iteration_prefix = [](int64_t iter) {
         if (iter < 0)
             return std::string("");
         return std::to_string(iter) + "_";
     };
-
-    // This extra flush command is needed for dynamic models in both cases of out_of_order / in_order operating mode
-    // since it reduces `bubbles` number in pipeline and GPU's idle time by timely flushing new kernels to device.
-    // The freqency of flushing (16) is selected empirically, see details in tickets 116365, 116287, 139931.
-    const bool is_out_of_order_queue = get_stream().get_queue_type() == QueueTypes::out_of_order;
     const bool needs_flushing = _is_dynamic;
     const size_t flush_frequency = needs_flushing ? 16 : 0;
     size_t executed_prims = 0;
-    std::map<std::string, std::vector<int64_t>> tp_host_times_each_iter;
     for (auto& inst : _exec_order) {
         auto start = std::chrono::high_resolution_clock::now();
         // Load binary dump for input layers
@@ -1254,6 +1274,7 @@ void network::execute_impl(const std::vector<event::ptr>& events) {
             }
         }
     }
+#endif
     // statistic for each iter
     GPU_DEBUG_IF(debug_configuration::get_instance()->host_time_profiling) {
         for (auto& iter : tp_host_times_each_iter) {
@@ -1521,6 +1542,136 @@ std::vector<std::pair<primitive_inst*, int>> network::get_primitives(const std::
         return std::make_pair(get_primitive(node.first->id()).get(), node.second);
     });
     return result;
+}
+
+class MyInputFunc {
+public:
+    MyInputFunc(network* network) : _network(network) {}
+    MyInputFunc(const MyInputFunc& f) : _network(f._network) {}
+    ~MyInputFunc();
+    std::shared_ptr<prim_inst> operator()(oneapi::tbb::flow_control& fc) const {
+        // int tid = gettid();
+        bool end = false;
+        std::this_thread::sleep_for(std::chrono::milliseconds(40));
+        // std::stringstream ss;
+        // ss << "----- MyInputFunc " << _network->input_index << " *** " << tid  << "\n";
+        // std::cout << ss.str();
+        // _network->input_index++;
+        std::shared_ptr<prim_inst> prims = _network->get_dependencies(end);
+        if (end) {
+            // std::cout << "fc stop\n";
+            fc.stop();
+            return nullptr;
+        }
+        return prims;
+    }
+private:
+    network* _network;
+};
+MyInputFunc::~MyInputFunc() {}
+class MyOutputFunc {
+public:
+    MyOutputFunc(network* network) : _network(network) {}
+    void operator()(std::shared_ptr<prim_inst> prims) const {
+        // int tid = gettid();
+        _network->run_execute(prims);
+        // std::stringstream ss;
+        // ss << "----- MyOutputFunc  " << _network->output_index << " --- " << tid << "\n";
+        // std::cout << ss.str();
+        // _network->output_index++;
+    }
+private:
+    network* _network;
+};
+int network::run_pipeline(const std::vector<event::ptr>& events, int nthreads) {
+    // Need more than one token in flight per thread to keep all threads
+    // busy; 2-4 works
+    tbb::parallel_pipeline(
+        nthreads * 4,
+        tbb::make_filter<void, std::shared_ptr<prim_inst>>(tbb::filter_mode::serial_in_order, MyInputFunc(this)) &
+            tbb::make_filter<std::shared_ptr<prim_inst>, void>(tbb::filter_mode::serial_in_order, MyOutputFunc(this)));
+    // bool end = false;
+    // while (!end) {
+    //     auto prims = get_dependencies(end);
+    //     if (!end) {
+    //         run_execute(prims);
+    //     }
+    // }
+    return 1;
+}
+std::shared_ptr<prim_inst> network::get_dependencies(bool& end) {
+    std::vector<event::ptr> depends;
+    prim_inst prim_out;
+    if (_iterm != _exec_order.end()) {
+        end = false;
+        auto& primitive = *_iterm;
+        depends = primitive->get_dependencies(_in_events);
+        prim_out._dependencies = depends;
+        prim_out._exec_one = primitive;
+        _iterm = std::next(_iterm, 1);
+    } else {
+        end = true;
+    }
+    return std::make_shared<prim_inst>(prim_out);
+}
+event::ptr network::run_execute(std::shared_ptr<prim_inst> prims) {
+    GPU_DEBUG_GET_INSTANCE(debug_config);
+    auto& primitive = prims->_exec_one;
+    auto ev = primitive->run_execute(prims->_dependencies);
+    auto get_iteration_prefix = [](int64_t iter) {
+        if (iter < 0)
+            return std::string("");
+        return std::to_string(iter) + "_";
+    };
+    if (get_stream().get_queue_type() == QueueTypes::out_of_order || _enable_profiling || primitive->needs_completion_event()) {
+        auto id = primitive->id();
+        _events.insert({id, ev});
+    }
+    executed_prims++;
+    if (needs_flushing && executed_prims % flush_frequency == 0)
+        get_stream().flush();
+    // Dump output buffers of 'inst'
+    GPU_DEBUG_IF(debug_config->dump_layers_path.length() > 0) {
+        get_stream().finish();
+        const std::string layer_name = primitive->id();
+        auto prog_id = ((get_program() != nullptr) ? get_program()->get_id() : 0);
+        auto net_id = get_id();
+        GPU_DEBUG_IF(debug_config->is_target_iteration(curr_iter) &&
+                     debug_config->is_layer_for_dumping(layer_name, primitive->is_output(), primitive->is_input())) {
+            std::string debug_str_for_bin_load =
+                " Command for loading : OV_GPU_LoadDumpRawBinary=\"" + layer_name + ":";
+            for (size_t i = 0; i < get_primitive(layer_name)->outputs_memory_count(); i++) {
+                std::string name = "program" + std::to_string(prog_id) + "_network" + std::to_string(net_id) + "_" +
+                                   get_iteration_prefix(curr_iter) + layer_name + "_dst" + std::to_string(i);
+                auto output_mem = get_primitive(layer_name)->output_memory_ptr(i);
+                if (output_mem == nullptr) {
+                    GPU_DEBUG_COUT << " output_mem is nullptr. Nothing to dump." << std::endl;
+                    continue;
+                }
+                GPU_DEBUG_IF(debug_config->dump_layers_binary) {
+                    // Binary dump : raw
+                    auto output_layout = primitive->get_output_layout(i);
+                    auto filename = get_file_path_for_binary_dump(output_layout, name);
+                    mem_lock<char, mem_lock_type::read> lock(output_mem, get_stream());
+                    ov::util::save_binary(filename, lock.data(), output_mem->size());
+                    GPU_DEBUG_COUT << " Dump layer dst : " << layer_name << " to " << filename << std::endl;
+                    debug_str_for_bin_load += (filename + ",");
+                } else {
+                    // Text dump
+                    log_memory_to_file(output_mem,
+                                       primitive->get_output_layout(i),
+                                       get_stream(),
+                                       name,
+                                       debug_config->dump_layers_raw);
+                }
+            }
+            GPU_DEBUG_IF(debug_config->dump_layers_binary && primitive->is_input()) {
+                debug_str_for_bin_load[debug_str_for_bin_load.size() - 1] = '\"';
+                GPU_DEBUG_COUT << debug_str_for_bin_load << std::endl;
+            }
+        }
+    }
+    return ev;
 }
 
 void network::execute_primitive(const std::shared_ptr<primitive_inst>& primitive,
