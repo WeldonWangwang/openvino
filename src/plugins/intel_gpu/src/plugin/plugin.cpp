@@ -414,9 +414,10 @@ std::shared_ptr<ov::ICompiledModel> Plugin::import_model(std::istream& model,
                                                          const ov::SoPtr<ov::IRemoteContext>& context,
                                                          const ov::AnyMap& orig_config) const {
     OV_ITT_SCOPED_TASK(itt::domains::intel_gpu_plugin, "Plugin::ImportNetwork");
-
+    std::string device_id = get_device_id(orig_config);
     auto context_impl = get_context_impl(context);
-    auto device_id = ov::DeviceIDParser{context_impl->get_device_name()}.get_device_id();
+    //auto device_id = ov::DeviceIDParser{context_impl->get_device_name()}.get_device_id();
+    OPENVINO_ASSERT(m_configs_map.find(device_id) != m_configs_map.end(), "[GPU] compile_model: Couldn't find config for GPU with id ", device_id);
 
     // check ov::loaded_from_cache property and erase it due to not needed any more.
     auto _orig_config = orig_config;
@@ -433,8 +434,31 @@ std::shared_ptr<ov::ICompiledModel> Plugin::import_model(std::istream& model,
 
     if (config.get_property(ov::cache_mode) == ov::CacheMode::OPTIMIZE_SIZE)
         return nullptr;
-
     cldnn::BinaryInputBuffer ib(model, context_impl->get_engine());
+    std::size_t num_sub_compiled_models = 0;
+    ib >> num_sub_compiled_models;
+
+    if (num_sub_compiled_models > 0) {
+        GPU_DEBUG_LOG << "Number of cached sub-compiled models for TP: " << num_sub_compiled_models << std::endl;
+        auto get_rank_table = [&]() {
+            std::vector<std::vector<int>> rank_table = {};
+            for (size_t i = 0; i < num_sub_compiled_models; i++) {
+                std::vector<int> init_rank = {};
+                init_rank.emplace_back(i);
+                rank_table.emplace_back(init_rank);
+            }
+            return rank_table;
+        };
+        for (std::size_t id = 0; id < num_sub_compiled_models; id++) {
+            std::string device_id;
+            ib >> device_id;
+            GPU_DEBUG_LOG << "Registered cached device with id: GPU." << device_id << std::endl;
+            config.register_device_context_for_tp(get_default_context(device_id));
+            contexts_for_tp.insert({device_id, get_default_context(device_id)});
+        }
+        config.enableSubStreams = true;
+        config.streamsRankTable = get_rank_table();
+    }
     return std::make_shared<CompiledModel>(ib, shared_from_this(), context_impl, config, loaded_from_cache);
 }
 
@@ -675,6 +699,7 @@ std::vector<ov::PropertyName> Plugin::get_caching_properties() const {
         ov::PropertyName{ov::intel_gpu::execution_units_count.name(), PropertyMutability::RO},
         ov::PropertyName{ov::hint::inference_precision.name(), PropertyMutability::RW},
         ov::PropertyName{ov::hint::execution_mode.name(), PropertyMutability::RW},
+        ov::PropertyName{ov::device::priorities.name(), PropertyMutability::RW},
         ov::PropertyName{ov::hint::performance_mode.name(), PropertyMutability::RW},
         ov::PropertyName{ov::hint::dynamic_quantization_group_size.name(), PropertyMutability::RW},
     };
