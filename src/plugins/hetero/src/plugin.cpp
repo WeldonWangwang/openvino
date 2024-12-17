@@ -93,7 +93,9 @@ void ov::hetero::Plugin::get_device_memory_map(const std::vector<std::string>& d
         } else if (device_name.find("GPU") != std::string::npos) {
             try {
                 size_t device_mem = get_core()->get_property(device_name, ov::intel_gpu::device_total_mem_size);
+                // device_mem = 12168932136;
                 available_device_mem_map[device_name] = device_mem;
+                std::cout << device_mem << std::endl;
             } catch (const ov::Exception&) {
             }
         }
@@ -157,25 +159,25 @@ std::pair<ov::SupportedOpsMap, ov::hetero::SubgraphsMappingInfo> ov::hetero::Plu
                 // Estimate the memory size required for the model is 1.2 * total_ops_size
                 // 1. Check if current device that can take the entire model
                 // 2. Check if all left devices can take the entire model
-                if (available_device_mem_map[device_name] >= 1.2 * total_ops_size || device_name.find("CPU") == 0) {
-                    device_config[ov::internal::query_model_ratio.name()] = 1.0f;
-                } else if (available_discrete_device_memory >= 1.2 * total_ops_size ||
-                           available_device_mem_map.count("CPU")) {
-                    float model_ratio =
-                        total_ops_size > 0
-                            ? static_cast<float>(available_device_mem_map[device_name] * 1.0 / (1.2 * total_ops_size))
-                            : 1.0f;
-                    if (total_ops_size < available_device_mem_map[device_name]) {
-                        model_ratio = 1.0f;
-                    }
-                    device_config[ov::internal::query_model_ratio.name()] = model_ratio;
-                } else {
+                // if (available_device_mem_map[device_name] >= 1.2 * total_ops_size || device_name.find("CPU") == 0) {
+                //     device_config[ov::internal::query_model_ratio.name()] = 1.0f;
+                // // } else if (available_discrete_device_memory >= 1.2 * total_ops_size ||
+                // //            available_device_mem_map.count("CPU")) {
+                // //     float model_ratio =
+                // //         total_ops_size > 0
+                // //             ? static_cast<float>(available_device_mem_map[device_name] * 1.0 / (1.2 * total_ops_size))
+                // //             : 1.0f;
+                // //     if (total_ops_size < available_device_mem_map[device_name]) {
+                // //         model_ratio = 1.0f;
+                // //     }
+                // //     device_config[ov::internal::query_model_ratio.name()] = model_ratio;
+                // } else {
                     float model_ratio = available_discrete_device_memory > 0
                                             ? static_cast<float>(available_device_mem_map[device_name] * 1.0 /
                                                                  available_discrete_device_memory)
                                             : 1.0f;
                     device_config[ov::internal::query_model_ratio.name()] = model_ratio;
-                }
+                // }
                 // Remove the current device
                 available_device_mem_map.erase(device_name);
             }
