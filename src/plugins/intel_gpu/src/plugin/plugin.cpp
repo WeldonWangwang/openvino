@@ -558,7 +558,40 @@ ov::Any Plugin::get_property(const std::string& name, const ov::AnyMap& options)
         device_id = options.find(ov::device::id.name())->second.as<std::string>();
     }
 
-    const auto& c = m_configs_map.at(device_id);
+    auto parse_devices_id = [&](const std::string devices_for_tp,
+                                const std::string delimiter = ",") -> std::vector<std::string> {
+        std::size_t start = 0, end = devices_for_tp.find(delimiter);
+        std::vector<std::string> ret;
+        while (end != std::string::npos) {
+            std::string device_with_id = devices_for_tp.substr(start, end - start);
+            auto dotPos = device_with_id.find(".");
+            if (dotPos != std::string::npos) {
+                auto target_id = device_with_id.substr(dotPos + 1);
+                ret.push_back(target_id);
+            }
+            start = end + delimiter.length();
+            end = devices_for_tp.find(delimiter, start);
+        }
+        std::string last = devices_for_tp.substr(start);
+        auto dotPos = last.find(".");
+        if (dotPos != std::string::npos) {
+            auto target_id = last.substr(dotPos + 1);
+            ret.push_back(target_id);
+        }
+        return ret;
+    };
+    if (m_configs_map.find(device_id) == m_configs_map.end()) {
+        device_ids = parse_devices_id(device_id);
+        for (auto id : device_ids) {
+            OPENVINO_ASSERT(m_configs_map.find(id) != m_configs_map.end(),
+                            "[GPU] get_property: Couldn't find config for GPU with id ",
+                            device_id);
+        }
+    } else {
+        device_ids.emplace_back(device_id);
+    }
+
+    const auto& c = m_configs_map.at(device_ids.front());
     return c.get_property(name, OptionVisibility::RELEASE);
 }
 
