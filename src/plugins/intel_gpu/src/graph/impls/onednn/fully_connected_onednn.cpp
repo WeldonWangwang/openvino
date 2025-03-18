@@ -7,8 +7,10 @@
 #include "intel_gpu/primitives/fully_connected.hpp"
 #include "intel_gpu/runtime/utils.hpp"
 #include "primitive_onednn_base.h"
-#include "registry/implementation_manager.hpp"
+#include "registry/implementation_map.hpp"
 
+#include "impls/ocl/kernel_selector_helper.h"
+#include "openvino/runtime/threading/cpu_message.hpp"
 #include <oneapi/dnnl/dnnl.hpp>
 
 #include <algorithm>

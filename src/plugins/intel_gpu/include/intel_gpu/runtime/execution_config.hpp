@@ -10,6 +10,8 @@
 #include "intel_gpu/runtime/internal_properties.hpp"
 #include "openvino/runtime/internal_properties.hpp"
 #include <thread>
+#include "intel_gpu/runtime/device.hpp"
+#include "openvino/runtime/threading/istreams_executor.hpp"
 
 namespace ov::intel_gpu {
 
@@ -32,6 +34,11 @@ struct ExecutionConfig : public ov::PluginConfig {
     using ov::PluginConfig::finalize;
 
     const ov::AnyMap& get_user_properties() const { return m_user_properties; }
+    ov::AnyVector get_context_for_tp() const { return device_world_contexts; }
+    void register_device_context_for_tp(const ov::Any context) { device_world_contexts.push_back(context);}
+    bool enableSubStreams = false;
+    ov::threading::IStreamsExecutor::Config subStreamExecConfig;
+    std::vector<std::vector<int>> streamsRankTable;
 
 protected:
     void finalize_impl(const IRemoteContext* context) override;
@@ -44,6 +51,7 @@ protected:
     void apply_performance_hints(const cldnn::device_info& info);
     void apply_priority_hints(const cldnn::device_info& info);
 
+    ov::AnyVector device_world_contexts;
     #include "intel_gpu/runtime/options.inl"
 };
 

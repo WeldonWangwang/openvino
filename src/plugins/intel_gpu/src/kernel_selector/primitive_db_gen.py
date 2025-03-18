@@ -241,12 +241,12 @@ class Kernels2CHeaders(object):
             return
 
         # Remove comments
-        content = comment_regexp.sub(comment_replacer, content)
+        # content = comment_regexp.sub(comment_replacer, content)
         # Remove empty lines
-        content = os.linesep.join([s for s in content.splitlines() if s])
+        # content = os.linesep.join([s for s in content.splitlines() if s])
         # Remove multiple spaces
-        content = content.replace("\\\n", "")
-        content = re.sub(' +', ' ', content)
+        # content = content.replace("\\\n", "")
+        # content = re.sub(' +', ' ', content)
 
         return content
 

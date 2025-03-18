@@ -24,6 +24,7 @@
 #include "intel_gpu/op/fully_connected_compressed.hpp"
 #include "intel_gpu/op/placeholder.hpp"
 #include "openvino/util/pp.hpp"
+#include "intel_gpu/op/sync_tensor.hpp"
 
 #ifdef __linux__
 # include <dlfcn.h>

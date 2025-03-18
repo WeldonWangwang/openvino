@@ -14,6 +14,7 @@
 #include "intel_gpu/plugin/sync_infer_request.hpp"
 #include "intel_gpu/plugin/remote_context.hpp"
 #include "intel_gpu/plugin/remote_tensor.hpp"
+#include "intel_gpu/plugin/tuple_remote_tensor.hpp"
 #include "intel_gpu/plugin/compiled_model.hpp"
 #include "intel_gpu/plugin/variable_state.hpp"
 #include "intel_gpu/plugin/multi_tensor_variable_state.hpp"
@@ -22,6 +23,8 @@
 #include "intel_gpu/runtime/internal_properties.hpp"
 #include "intel_gpu/runtime/itt.hpp"
 #include "intel_gpu/runtime/debug_configuration.hpp"
+#include "intel_gpu/plugin/async_infer_request.hpp"
+#include "openvino/runtime/threading/cpu_message.hpp"
 
 #include <algorithm>
 #include <iterator>
@@ -102,10 +105,54 @@ SyncInferRequest::SyncInferRequest(const std::shared_ptr<const CompiledModel>& c
 
 void SyncInferRequest::infer() {
     OV_ITT_SCOPED_TASK(itt::domains::intel_gpu_plugin, "SyncInferRequest::infer");
+    auto message = ov::threading::message_manager();
+    if (m_asyncRequest->m_has_sub_infers) {
+        sub_streams_infer();
+        message->server_wait();
+        return;
+    }
+
     setup_stream_graph();
     std::lock_guard<std::mutex> lk(m_graph->get_mutex());
     enqueue();
     wait();
+}
+
+void SyncInferRequest::sub_streams_infer() {
+    // sub streams infer
+    auto message = ov::threading::message_manager();
+    auto requests = m_asyncRequest->getSubInferRequest();
+    size_t requests_num = requests.size();
+    auto inputs = get_inputs();
+    auto outputs = get_outputs();
+
+    if (requests.size() > 0) {
+        for (const auto& output : outputs) {
+            auto tensor = requests[0]->get_tensor(output);
+            set_tensor(output, tensor);
+        }
+        for (size_t i = 0; i < requests_num; i++) {
+            for (auto& input : inputs) {
+                auto tensor = get_tensor(input);
+                if (auto remote = std::dynamic_pointer_cast<ov::intel_gpu::TupleRemoteTensorImpl>(tensor._ptr)) {
+                    requests[i]->set_tensor(input,
+                                            remote->get_tensor_by_name(
+                                                requests[i]->get_compiled_model()->get_context()->get_device_name()));
+                } else {
+                    requests[i]->set_tensor(input, tensor);
+                }
+            }
+
+            requests[i]->set_callback([message](const std::exception_ptr& ptr) {
+                ov::threading::MessageInfo msg_info;
+                msg_info.msg_type = ov::threading::MsgType::CALL_BACK;
+                message->send_message(msg_info);
+            });
+        }
+        for (size_t i = 0; i < requests_num; i++) {
+            requests[i]->start_async();
+        }
+    }
 }
 
 std::vector<ov::ProfilingInfo> SyncInferRequest::get_profiling_info() const {
@@ -114,11 +161,24 @@ std::vector<ov::ProfilingInfo> SyncInferRequest::get_profiling_info() const {
 }
 
 std::vector<ov::SoPtr<ov::IVariableState>> SyncInferRequest::query_state() const {
+    if (m_asyncRequest->m_has_sub_infers) {
+        auto requests = m_asyncRequest->getSubInferRequest();
+        std::vector<ov::SoPtr<ov::IVariableState>> states;
+        for (auto request : requests) {
+            auto cur = request->query_state();
+            states.insert(states.end(), cur.begin(), cur.end());
+        }
+        return states;
+    }
     std::vector<ov::SoPtr<ov::IVariableState>> ret{};
     for (const auto& pair : m_variables) {
         ret.emplace_back(pair.second, nullptr);
     }
     return ret;
+}
+
+void SyncInferRequest::set_async_request(ov::intel_gpu::AsyncInferRequest* asyncRequest) {
+    m_asyncRequest = asyncRequest;
 }
 
 void SyncInferRequest::set_tensor(const ov::Output<const ov::Node>& port, const ov::SoPtr<ov::ITensor>& tensor) {

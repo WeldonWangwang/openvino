@@ -37,21 +37,24 @@
 
 namespace ov::intel_gpu {
 
-Graph::Graph(std::shared_ptr<ov::Model> model, const RemoteContextImpl::Ptr& context, const ExecutionConfig& config, uint16_t stream_id)
+Graph::Graph(std::shared_ptr<ov::Model> model, const RemoteContextImpl::Ptr& context, const ExecutionConfig& config, uint16_t stream_id,
+            const std::shared_ptr<SubMemoryManager> sub_memory_manager)
     : m_context(context)
     , m_config(config)
     , m_stream_id(stream_id) {
-    auto program_builder = std::make_shared<ProgramBuilder>(model, get_engine(), config);
-    m_config = program_builder->get_config();
+    if (!m_config.enableSubStreams) {
+        auto program_builder = std::make_shared<ProgramBuilder>(model, get_engine(), config, false);
+        m_config = program_builder->get_config();
+        m_sub_memory_manager = sub_memory_manager;
+        build(program_builder->get_compiled_program());
 
-    build(program_builder->get_compiled_program());
-
-    primitiveIDs = program_builder->primitive_ids;
-    inputPrimitiveIDs = program_builder->inputPrimitiveIDs;
-    prevPrimitiveIDs = program_builder->prevPrimitiveIDs;
-    profilingIDs = program_builder->profiling_ids;
-    perfMap = program_builder->perfMap;
-    m_input_layouts = program_builder->get_input_layouts();
+        primitiveIDs = program_builder->primitive_ids;
+        inputPrimitiveIDs = program_builder->inputPrimitiveIDs;
+        prevPrimitiveIDs = program_builder->prevPrimitiveIDs;
+        profilingIDs = program_builder->profiling_ids;
+        perfMap = program_builder->perfMap;
+        m_input_layouts = program_builder->get_input_layouts();
+    }
 }
 
 Graph::Graph(cldnn::BinaryInputBuffer &ib, const RemoteContextImpl::Ptr& context, const ExecutionConfig& config, uint16_t stream_id)
@@ -149,11 +152,13 @@ Graph::~Graph() {
         if (host_exec_times.size() >= 1) {
             print_entry("First", host_exec_times[0], 1);
         }
-
         if (host_exec_times.size() >= 2) {
+            print_entry("Second", host_exec_times[1], 1);
+        }
+        if (host_exec_times.size() > 2) {
             HostTimeProfilingEntry avg;
 
-            const auto begin = std::begin(host_exec_times) + 1;
+            const auto begin = std::begin(host_exec_times) + 2;
             const auto end = std::end(host_exec_times);
             avg.inputs_processing = std::accumulate(begin, end, 0,
                 [](int64_t sum, const HostTimeProfilingEntry& entry) { return sum + entry.inputs_processing; });
@@ -164,7 +169,7 @@ Graph::~Graph() {
             avg.outputs_processing = std::accumulate(begin, end, 0,
                 [](int64_t sum, const HostTimeProfilingEntry& entry) { return sum + entry.outputs_processing; });
 
-            const auto iters_num = host_exec_times.size() - 1;
+            const auto iters_num = host_exec_times.size() - 2;
             print_entry("Avg", avg, iters_num);
         }
     }
@@ -177,9 +182,9 @@ void Graph::build(std::shared_ptr<cldnn::program> program) {
     if (external_queue) {
         OPENVINO_ASSERT(m_config.get_num_streams() == 1, "[GPU] Throughput streams can't be used with shared queue!");
         const auto &engine = program->get_engine();
-        m_network = std::make_shared<cldnn::network>(program, engine.create_stream(m_config, external_queue), m_stream_id);
+        m_network = std::make_shared<cldnn::network>(program, engine.create_stream(m_config, external_queue), m_stream_id, m_sub_memory_manager);
     } else {
-        m_network = std::make_shared<cldnn::network>(program, m_stream_id);
+        m_network = std::make_shared<cldnn::network>(program, m_stream_id, m_sub_memory_manager);
     }
 
     std::string dry_run_path = GPU_DEBUG_VALUE_OR(m_config.get_dry_run_path(), "");

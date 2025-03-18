@@ -22,6 +22,7 @@
 #include "eltwise_inst.h"
 #include "loop_inst.h"
 #include "deconvolution_inst.h"
+#include "sync_tensor_inst.h"
 #include "shape_of_inst.h"
 #include "softmax_inst.h"
 #include "strided_slice_inst.h"
@@ -271,6 +272,27 @@ event::ptr primitive_inst::set_output_memory(memory::ptr mem_new, bool check, si
     } else {
         _outputs[idx] = mem_new;
         _max_output_layout_count[idx] = mem_new->get_layout().get_linear_size();
+        ev = get_network().get_stream().create_user_event(true);
+        if (get_node().is_type<sync_tensor>() && get_node().get_preferred_impl_type() == impl_types::ocl) {
+            auto w_rank = get_network().get_program()->get_config().subStreamExecConfig.get_rank()[0];
+            // auto w_size = get_network().get_program()->get_config().get_context_for_tp().size();
+            if (_outputs.size() == 2) {
+                // All gather, need concat
+                // _outputs[w_rank + 1] = mem_new;
+                std::cout << "set_output_memory(sync_tensor gather): old = "
+                          << _outputs[0]->get_layout().get_shape().to_string()
+                          << ", new = " << mem_new->get_layout().get_shape().to_string() << std::endl;
+                _outputs[1] = mem_new;
+            } else {
+                // All reduce
+                std::cout << "set_output_memory(sync_tensor reduce): old = "
+                          << _outputs[w_rank]->get_layout().get_shape().to_string()
+                          << ", new = " << mem_new->get_layout().get_shape().to_string() << std::endl;
+                _outputs[0] = mem_new;
+            }
+        } else {
+            _outputs[idx] = mem_new;
+        }
     }
     return ev;
 }
@@ -285,14 +307,24 @@ void primitive_inst::update_shape() {
         return;
     }
     bool input_shape_changed = false;
+    // update weight shape for impl params
+    if (_node->is_type<fully_connected>()) {
+        const auto weights_idx = _node->get_primitive()->input.size();
+        const auto original_weights_memory = dep_memory_ptr(weights_idx);
+        if (_impl_params->input_layouts[1] != original_weights_memory->get_layout())
+            _impl_params->input_layouts[1] = original_weights_memory->get_layout();
+        GPU_DEBUG_TRACE_DETAIL << id() << ": update weight shape to "
+                               <<  _impl_params->input_layouts[1].to_short_string() << std::endl;
+    }
+
     for (size_t i = 0; i < _deps.size(); i++) {
         auto idx = _deps[i].second;
-        auto new_shape = _deps[i].first->_impl_params->get_output_layout(idx);
-        if (_impl_params->get_input_layout(i) != new_shape) {
+        auto new_layout = _deps[i].first->_impl_params->get_output_layout(idx);
+        if (_impl_params->get_input_layout(i) != new_layout) {
             GPU_DEBUG_TRACE_DETAIL << id() << ": update shape dep [" << i << "] : " << _deps[i].first->id()
                                    << " was: " << _impl_params->get_input_layout(i).to_short_string()
-                                   << " now: " << new_shape.to_short_string() << std::endl;
-            _impl_params->input_layouts[i] = new_shape;
+                                   << " now: " << new_layout.to_short_string() << std::endl;
+            _impl_params->input_layouts[i] = new_layout;
             input_shape_changed = true;
         }
     }
@@ -410,6 +442,22 @@ void primitive_inst::update_shape() {
     std::vector<event::ptr> dependencies_events;
     auto queue_type = get_network().get_stream().get_queue_type();
     bool has_runtime_deps = false;
+
+    auto print_arr = [&](std::vector<size_t> vec, size_t max_len) {
+        std::stringstream ss;
+        for (size_t i = 0; i < std::min(max_len, vec.size()); i++) {
+            ss << vec[i] << ", ";
+        }
+        GPU_DEBUG_TRACE_DETAIL << "Array shape_infer_deps (len=" << vec.size() << ") content: " << ss.str() << "\n";
+    };
+
+
+    if (get_node().is_type<paged_attention>()) {
+        auto shape_infer_deps = _node->get_shape_infer_dependencies();
+        print_arr(shape_infer_deps, shape_infer_deps.size());
+    }
+
+
     for (auto& i : _node->get_shape_infer_dependencies()) {
         // Some primitives may have flexible count of deps (e.g. reshape), thus allow skipping some deps
         if (memory_deps.count(i) > 0 || i >= _node->get_dependencies().size()) {
@@ -898,7 +946,8 @@ void primitive_inst::realloc_if_needed(bool prev_execution_skipped) {
                                          : kv_cache_inst::get_scale_zp_sequence_axis();
 
             prealloc_info = sp.predict_preallocation_shape(id(), updated_layouts[i], false, i, tmp_prealloc_count, seq_axis);
-        } else {
+        } else if (!_node->is_type<sync_tensor>()) {
+            // Sync_tensor doesn't need predict_preallocation_shape
             prealloc_info = sp.predict_preallocation_shape(id(), updated_layouts[i], can_reuse_buffer, i, tmp_prealloc_count);
         }
         if (prealloc_info.first && sp.can_preallocate(ov::shape_size(prealloc_info.second) * (dt_sizes_in_B[i]))) {
@@ -943,6 +992,14 @@ void primitive_inst::realloc_if_needed(bool prev_execution_skipped) {
                                    << " Current buffer_size=" << _max_output_layout_count[i]
                                    << " Requested buffer_size=" << updated_layouts[i].get_linear_size()
                                    << std::endl;
+#if 0
+            if (_node->is_type<sync_tensor>()) {
+                std::cout << " sync_tensor outputs[" << i << "] "
+                          << " Current buffer_size=" << _max_output_layout_count[i]
+                          << " Requested buffer_size=" << updated_layouts[i].get_linear_size()
+                          << ", shape = " << updated_params.get_output_layout(i).get_shape().to_string() << std::endl;
+            }
+#endif
             _outputs[i] = allocate_output(_network.get_engine(),
                                           _network.get_memory_pool(),
                                           *_node,
@@ -2426,6 +2483,20 @@ memory::ptr primitive_inst::allocate_output(engine& _engine,
 
     auto alloc_type = use_lockable_memory ? lockable_mem_type
                     : !usm_device_allocatable ? lockable_mem_type : allocation_type::usm_device;
+
+    static const char* env = getenv("OV_GPU_P2P_DISABLED");
+    if (!env) {
+        if (_node.is_type<fully_connected>() && _node.as<fully_connected>().w_size != 1 && !is_output_buffer) {
+            alloc_type = allocation_type::cl_mem;
+        }
+        if (is_output_buffer && getenv("OV_ENABLE_LAST_FC"))
+            alloc_type = allocation_type::cl_mem;
+        if (_node.is_type<sync_tensor>()) {
+            alloc_type = allocation_type::cl_mem;
+            // std::cout << "Sync_tensor allocate: shape = " << layout.get_shape().to_string() << ", impl_params.layout["
+            //           << idx << "] = " << out_layout.to_short_string() << std::endl;
+        }
+    }
 
     if (is_internal) {
         bool is_reorder_weights = _node.is_type<reorder>() && _node.as<reorder>().get_primitive()->weights_reorder_params;

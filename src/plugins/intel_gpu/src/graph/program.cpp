@@ -43,6 +43,7 @@
 #include "data_inst.h"
 #include "deconvolution_inst.h"
 #include "detection_output_inst.h"
+#include "fully_connected_inst.h"
 #include "generate_proposals_inst.h"
 #include "experimental_detectron_generate_proposals_single_image_inst.hpp"
 #include "input_layout_inst.h"
@@ -583,6 +584,9 @@ void program::pre_optimize_graph(bool is_internal) {
 
     // Mark operations that might be skipped at runtime as can_be_optimized.
     apply_opt_pass<mark_runtime_skippable_nodes>();
+
+    // add tp
+    //apply_opt_pass<add_required_all_reduce>();
 }
 
 void program::post_optimize_graph(bool is_internal) {
@@ -615,7 +619,6 @@ void program::post_optimize_graph(bool is_internal) {
 
     // update inner program input/output primitive mappings
     apply_opt_pass<update_inner_program_io_map>();
-
     // Recalculate processing order after all graph transformation to keep optimal primitives ordering
     // for OOO queue
     if (_config.get_queue_type() == QueueTypes::out_of_order)

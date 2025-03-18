@@ -28,11 +28,13 @@
 #include "fully_connected_inst.h"
 #include "paged_attention_inst.h"
 #include "convolution_inst.h"
+#include "concatenation_inst.h"
 #include "deconvolution_inst.h"
 #include "mutable_data_inst.h"
 #include "condition_inst.h"
 #include "read_value_inst.h"
 #include "reshape_inst.h"
+#include "sync_tensor_inst.h"
 #include "kv_cache_inst.h"
 #include "program_helpers.h"
 #include "program_dump_graph.h"
@@ -169,7 +171,7 @@ static uint32_t get_unique_net_id() {
 Network will always have net_id = 0 when it will be cldnn internal micronetwork (created i.e by propagate_constants
 opt pass).
 */
-network::network(program::ptr program, stream::ptr stream, bool is_internal, bool is_primary_stream)
+network::network(program::ptr program, stream::ptr stream, bool is_internal, bool is_primary_stream, ov::intel_gpu::SubMemoryManager::cptr sub_memory_manager)
     : _program(program)
     , _engine(program->get_engine())
     , _stream(stream)
@@ -178,7 +180,8 @@ network::network(program::ptr program, stream::ptr stream, bool is_internal, boo
     , _is_primary_stream(is_primary_stream)
     , _enable_profiling(program->get_config().get_enable_profiling())
     , _reset_arguments(true)
-    , _shape_predictor(new ShapePredictor(&program->get_engine(), program->get_config().get_shape_predictor_settings())) {
+    , _shape_predictor(new ShapePredictor(&program->get_engine(), program->get_config().get_shape_predictor_settings()))
+    , _sub_memory_manager(sub_memory_manager) {
     if (!_internal) {
         net_id = get_unique_net_id();
     }
@@ -195,32 +198,67 @@ network::network(program::ptr program, stream::ptr stream, bool is_internal, boo
     validate_primitives();
     preallocate_shape_info_buffers();
     add_default_output_chains();
+
+    if (_sub_memory_manager) {
+        auto id = get_program()->get_config().subStreamExecConfig.get_rank()[0];
+        _sub_memory_manager->_memorys_table[0][id].stream_ptr = _stream;
+        _sub_memory_manager->_memorys_table[1][id].stream_ptr = _stream;
+    }
 }
 
-network::network(program::ptr program, bool is_internal, bool is_primary_stream)
-    :  network(program, program->get_engine().create_stream(program->get_config()), is_internal, is_primary_stream) {}
+network::network(program::ptr program, bool is_internal, bool is_primary_stream, ov::intel_gpu::SubMemoryManager::cptr sub_memory_manager)
+    :  network(program, program->get_engine().create_stream(program->get_config()), is_internal, is_primary_stream, sub_memory_manager) {}
 
 network::network(engine& engine,
                  const topology& topo,
                  const ExecutionConfig& config,
                  bool is_internal,
-                 std::shared_ptr<ov::threading::IStreamsExecutor> task_executor)
-    : network(program::build_program(engine, topo, config, task_executor, is_internal), is_internal, true) {}
+                 std::shared_ptr<ov::threading::IStreamsExecutor> task_executor,
+                 ov::intel_gpu::SubMemoryManager::cptr sub_memory_manager)
+    : network(program::build_program(engine, topo, config, task_executor, is_internal), is_internal, true, sub_memory_manager) {}
 
 network::network(engine& engine,
                  const std::set<std::shared_ptr<program_node>>& nodes,
                  const ExecutionConfig& config,
                  std::shared_ptr<ov::threading::IStreamsExecutor> task_executor,
-                 bool is_internal)
-    : network(program::build_program(engine, nodes, config, task_executor, is_internal), is_internal, true) {}
+                 bool is_internal,
+                 ov::intel_gpu::SubMemoryManager::cptr sub_memory_manager)
+    : network(program::build_program(engine, nodes, config, task_executor, is_internal), is_internal, true, sub_memory_manager) {}
 
-network::network(program::ptr program, uint16_t stream_id)
-    : network(program, program->get_engine().create_stream(program->get_config()), false, stream_id == 0) {}
+network::network(program::ptr program, uint16_t stream_id, ov::intel_gpu::SubMemoryManager::cptr sub_memory_manager)
+    : network(program, program->get_engine().create_stream(program->get_config()), false, stream_id == 0, sub_memory_manager) {}
 
-network::network(program::ptr program, stream::ptr stream, uint16_t stream_id)
-    : network(program, stream, false, stream_id == 0) {}
+network::network(program::ptr program, stream::ptr stream, uint16_t stream_id, ov::intel_gpu::SubMemoryManager::cptr sub_memory_manager)
+    : network(program, stream, false, stream_id == 0, sub_memory_manager) {}
 
 network::~network() {
+    GPU_DEBUG_IF(debug_configuration::get_instance()->host_time_profiling) {
+        for (auto& iter : tp_host_times) {
+            if (tp_host_times[iter.first].size() >= 2) {
+                double first = static_cast<double>(tp_host_times[iter.first][0]);
+                double second = static_cast<double>(tp_host_times[iter.first][1]);
+                double avg = static_cast<double>(
+                    std::accumulate(
+                        tp_host_times[iter.first].begin() + 2, tp_host_times[iter.first].end(),
+                        (size_t)0, std::plus<size_t>()));
+                avg /= (tp_host_times[iter.first].size() - 2);
+                std::string resolution = " us";
+                if (avg > 1000.0) {
+                    resolution = " ms";
+                    avg /= 1000.0;
+                    first /= 1000.0;
+                    second /= 1000.0;
+                }
+                GPU_DEBUG_COUT << "Network[" << net_id << "] First infer total " << iter.first << "  time: " << first << resolution << std::endl;
+                GPU_DEBUG_COUT << "Network[" << net_id << "] second " << iter.first << " second host time: " << second << resolution << std::endl;
+                GPU_DEBUG_COUT << "Network[" << net_id << "] 3rd+ " << iter.first << " avg host time: " << avg << resolution << std::endl;
+            }
+        }
+    }
+    #ifdef GPU_DEBUG_CONFIG
+        GPU_DEBUG_COUT << "all reduce operations per infer: " << all_reduce_num_per_iter << std::endl;
+        GPU_DEBUG_COUT << "all gather operations per infer: " << all_gather_num_per_iter << std::endl;
+    #endif
     if (_program != nullptr)
         _program->cancel_compilation_context();
 
@@ -811,7 +849,7 @@ void network::execute_impl(const std::vector<event::ptr>& events) {
     const bool needs_flushing = _is_dynamic;
     const size_t flush_frequency = needs_flushing ? 16 : 0;
     size_t executed_prims = 0;
-
+    std::map<std::string, std::vector<int64_t>> tp_host_times_each_iter;
     for (auto& inst : _exec_order) {
         NODE_DEBUG(*inst);
 

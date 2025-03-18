@@ -35,6 +35,9 @@ void compile_graph::run(program& p) {
         bool can_select_impl = !node->is_type<data>() &&
                                !(node->is_type<mutable_data>() && node->get_dependencies().empty());
 
+        // if (node->is_type<paged_attention>())
+        //     can_select_impl = false;
+
         if (can_select_impl) {
             tasks.push_back([node, &exception] {
                 try {

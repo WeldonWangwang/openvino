@@ -13,6 +13,7 @@
 
 #include "intel_gpu/plugin/graph.hpp"
 #include "intel_gpu/plugin/plugin.hpp"
+#include "intel_gpu/plugin/sub_memory_manager.hpp"
 #include "intel_gpu/plugin/remote_context.hpp"
 #include "intel_gpu/runtime/execution_config.hpp"
 #include "openvino/runtime/icompiled_model.hpp"
@@ -26,7 +27,9 @@ public:
     CompiledModel(std::shared_ptr<ov::Model> model,
                   const std::shared_ptr<const ov::IPlugin>& plugin,
                   RemoteContextImpl::Ptr context,
-                  const ExecutionConfig& config);
+                  const ExecutionConfig& config,
+                  const std::shared_ptr<SubMemoryManager> sub_memory_manager = nullptr);
+
     CompiledModel(cldnn::BinaryInputBuffer& ib,
                   const std::shared_ptr<const ov::IPlugin>& plugin,
                   RemoteContextImpl::Ptr context,
@@ -35,6 +38,14 @@ public:
     ~CompiledModel() {
         auto streams_executor = std::dynamic_pointer_cast<ov::threading::IStreamsExecutor>(get_task_executor());
         streams_executor->cpu_reset();
+        if (m_has_sub_compiled_models) {
+            m_sub_compiled_models.clear();
+            m_sub_memory_manager->_memorys_table.clear();
+            if (m_sub_memory_manager->result != nullptr) {
+                free(m_sub_memory_manager->result);
+                m_sub_memory_manager->result = nullptr;
+            }
+        }
     }
 
     std::shared_ptr<ov::IAsyncInferRequest> create_infer_request() const override;
@@ -65,6 +76,15 @@ public:
     std::shared_ptr<Graph> get_graph(size_t n) const;
 
     void release_memory() override;
+    CompiledModel::Ptr get_tp_compiled_model() const;
+
+    std::vector<std::shared_ptr<CompiledModel>> get_sub_compiled_models() const {
+        return m_sub_compiled_models;
+    }
+
+    std::vector<std::shared_ptr<CompiledModel>> m_sub_compiled_models;
+    std::shared_ptr<SubMemoryManager> m_sub_memory_manager;
+    bool m_has_sub_compiled_models = false;
 
 private:
     RemoteContextImpl::Ptr m_context;

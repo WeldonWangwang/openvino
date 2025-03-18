@@ -297,5 +297,7 @@ REGISTER_FACTORY(internal, Placeholder);
 REGISTER_FACTORY(internal, SDPA);
 REGISTER_FACTORY(internal, IndirectSDPA);
 REGISTER_FACTORY(internal, RoPE);
+REGISTER_FACTORY(internal, SyncTensor);
+REGISTER_FACTORY(internal, RankConstant);
 REGISTER_FACTORY(internal, DynamicQuantize);
 REGISTER_FACTORY(internal, PagedAttentionExtension);
