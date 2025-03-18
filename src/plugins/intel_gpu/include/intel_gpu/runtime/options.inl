@@ -34,7 +34,7 @@ OV_CONFIG_RELEASE_OPTION(ov::internal, enable_lp_transformations, false, "Enable
 OV_CONFIG_RELEASE_OPTION(ov::intel_gpu, config_file, "", "Path to custom layers config file")
 OV_CONFIG_RELEASE_OPTION(ov::hint, model, nullptr, "Shared pointer to the ov::Model")
 OV_CONFIG_RELEASE_OPTION(ov::device, priorities, "", "temp used for TP")
-OV_CONFIG_RELEASE_OPTION(ov::hint, model_distribution_policy, "", "temp used for TP dist")
+OV_CONFIG_RELEASE_OPTION(ov::hint, model_distribution_policy, std::set<ov::hint::ModelDistributionPolicy>(), "temp used for TP dist")
 
 OV_CONFIG_RELEASE_INTERNAL_OPTION(ov::intel_gpu, shape_predictor_settings, {10, 16 * 1024, 2, 1.1f}, "Preallocation settings")
 OV_CONFIG_RELEASE_INTERNAL_OPTION(ov::intel_gpu, queue_type, QueueTypes::out_of_order, "Type of the queue that must be used for model execution. May be in-order or out-of-order")

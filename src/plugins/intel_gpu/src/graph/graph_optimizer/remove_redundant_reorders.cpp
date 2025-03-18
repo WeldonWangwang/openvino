@@ -440,7 +440,7 @@ void remove_redundant_reorders::run(program& p) {
                 (input.is_type<one_hot>() || input.is_type<permute>() || input.is_type<mvn>() ||
                  input.is_type<concatenation>() || input.is_type<depth_to_space>() || input.is_type<region_yolo>() ||
                  input.is_type<detection_output>() || input.is_type<gather>() || input.is_type<broadcast>() ||
-                 input.is_type<select>() || input.is_type<eltwise>() && !input.is_constant();
+                 input.is_type<select>() || input.is_type<eltwise>()) && !input.is_constant();
             // workaround for TP
             if (input.get_dependencies().size() > 0) {
                 auto& pred = input.get_dependency(0);

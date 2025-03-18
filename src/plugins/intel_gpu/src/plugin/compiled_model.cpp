@@ -32,19 +32,20 @@ std::shared_ptr<ov::threading::ITaskExecutor> create_task_executor(const std::sh
         // exclusive_async_requests essentially disables the streams (and hence should be checked first) => aligned with
         // the CPU behavior
         return plugin->get_executor_manager()->get_executor("GPU");
+    } else if (config.enableSubStreams) {
+        return std::make_shared<ov::threading::CPUStreamsExecutor>(
+            ov::threading::IStreamsExecutor::Config{"Intel GPU plugin executor",  config.get_num_streams()});
     } else if (config.get_enable_cpu_pinning() ||
-               config.get_enable_cpu_reservation()) {
+        config.get_enable_cpu_reservation()) {
         bool enable_cpu_pinning = config.get_enable_cpu_pinning();
         bool enable_cpu_reservation = config.get_enable_cpu_reservation();
         return std::make_shared<ov::threading::CPUStreamsExecutor>(
-            ov::threading::IStreamsExecutor::Config{"Intel GPU plugin executor",
-                                                    config.get_num_streams(),
-                                                    1,
-                                                    ov::hint::SchedulingCoreType::PCORE_ONLY,
-                                                    true});
-    } else if (config.enableSubStreams) {
-        return std::make_shared<ov::threading::CPUStreamsExecutor>(
-            ov::threading::IStreamsExecutor::Config{"Intel GPU plugin executor", config.get_property(ov::num_streams)});
+        ov::threading::IStreamsExecutor::Config{"Intel GPU plugin executor",
+                                                config.get_num_streams(),
+                                                1,
+                                                ov::hint::SchedulingCoreType::PCORE_ONLY,
+                                                enable_cpu_reservation,
+                                                enable_cpu_pinning});
     } else {
         return std::make_shared<ov::threading::CPUStreamsExecutor>(
             ov::threading::IStreamsExecutor::Config{"Intel GPU plugin executor",
@@ -101,7 +102,7 @@ CompiledModel::CompiledModel(std::shared_ptr<ov::Model> model,
                                                                  false,
                                                                  false,
                                                                  {},
-                                                                 configs_for_tp[i].streamsRankTable[i]};
+                                                                 {configs_for_tp[i].streamsRankTable[i]}};
                 configs_for_tp[i].subStreamExecConfig = std::move(streamExecutorConfig);
                 auto model_clone = model->clone();
                 //ov::serialize(model_clone, "./model_clone_original.xml");

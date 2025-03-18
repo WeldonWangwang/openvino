@@ -232,6 +232,8 @@ network::network(program::ptr program, stream::ptr stream, uint16_t stream_id, o
     : network(program, stream, false, stream_id == 0, sub_memory_manager) {}
 
 network::~network() {
+    // to be fixed
+    /*
     GPU_DEBUG_IF(debug_configuration::get_instance()->host_time_profiling) {
         for (auto& iter : tp_host_times) {
             if (tp_host_times[iter.first].size() >= 2) {
@@ -259,6 +261,7 @@ network::~network() {
         GPU_DEBUG_COUT << "all reduce operations per infer: " << all_reduce_num_per_iter << std::endl;
         GPU_DEBUG_COUT << "all gather operations per infer: " << all_gather_num_per_iter << std::endl;
     #endif
+    */
     if (_program != nullptr)
         _program->cancel_compilation_context();
 

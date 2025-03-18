@@ -10,7 +10,7 @@
 #include <condition_variable>
 #include <mutex>
 
-#include "impls/registry/implementation_map.hpp"
+#include "registry/implementation_map.hpp"
 #include "intel_gpu/runtime/error_handler.hpp"
 #include "register.hpp"
 #include "runtime/ocl/ocl_event.hpp"
@@ -603,7 +603,7 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
     DECLARE_OBJECT_TYPE_SERIALIZATION(cldnn::ocl::sync_tensor_impl)
 
     std::unique_ptr<primitive_impl> clone() const override {
-        return make_unique<sync_tensor_impl>(*this);
+        return std::make_unique<sync_tensor_impl>(*this);
     }
 
     sync_tensor_impl() : parent() {}
@@ -1439,7 +1439,7 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
 
 public:
     static std::unique_ptr<primitive_impl> create(const sync_tensor_node& arg, const kernel_impl_params& impl_param) {
-        return make_unique<sync_tensor_impl>();
+        return std::make_unique<sync_tensor_impl>();
     }
 
     std::vector<void*> all_gather_remote_dst;

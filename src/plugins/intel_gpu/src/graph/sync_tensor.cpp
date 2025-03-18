@@ -3,7 +3,6 @@
 //
 #include "intel_gpu/op/sync_tensor.hpp"
 #include "intel_gpu/plugin/common_utils.hpp"
-#include "intel_gpu/runtime/optionals.hpp"
 #include <sync_tensor_inst.h>
 #include "primitive_type_base.h"
 #include <sstream>

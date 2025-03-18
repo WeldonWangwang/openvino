@@ -43,7 +43,7 @@ Graph::Graph(std::shared_ptr<ov::Model> model, const RemoteContextImpl::Ptr& con
     , m_config(config)
     , m_stream_id(stream_id) {
     if (!m_config.enableSubStreams) {
-        auto program_builder = std::make_shared<ProgramBuilder>(model, get_engine(), config, false);
+        auto program_builder = std::make_shared<ProgramBuilder>(model, get_engine(), config);
         m_config = program_builder->get_config();
         m_sub_memory_manager = sub_memory_manager;
         build(program_builder->get_compiled_program());
