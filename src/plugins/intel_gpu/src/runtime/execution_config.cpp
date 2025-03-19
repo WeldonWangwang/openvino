@@ -88,6 +88,10 @@ ExecutionConfig::ExecutionConfig() : ov::PluginConfig() { }
 ExecutionConfig::ExecutionConfig(const ExecutionConfig& other) : ExecutionConfig() {
     m_user_properties = other.m_user_properties;
     m_is_finalized = other.m_is_finalized;
+    enableSubStreams = other.enableSubStreams;
+    subStreamExecConfig = other.subStreamExecConfig;
+    streamsRankTable = other.streamsRankTable;
+    device_world_contexts = other.device_world_contexts;
     for (const auto& kv : other.m_options_map) {
         m_options_map.at(kv.first)->set_any(kv.second->get_any());
     }
@@ -96,6 +100,10 @@ ExecutionConfig::ExecutionConfig(const ExecutionConfig& other) : ExecutionConfig
 ExecutionConfig& ExecutionConfig::operator=(const ExecutionConfig& other) {
     m_user_properties = other.m_user_properties;
     m_is_finalized = other.m_is_finalized;
+    enableSubStreams = other.enableSubStreams;
+    subStreamExecConfig = other.subStreamExecConfig;
+    streamsRankTable = other.streamsRankTable;
+    device_world_contexts = other.device_world_contexts;
     for (const auto& kv : other.m_options_map) {
         m_options_map.at(kv.first)->set_any(kv.second->get_any());
     }

@@ -101,6 +101,7 @@ CompiledModel::CompiledModel(std::shared_ptr<ov::Model> model,
                                                                  ov::hint::SchedulingCoreType::ANY_CORE,
                                                                  false,
                                                                  false,
+                                                                 true,
                                                                  {},
                                                                  {configs_for_tp[i].streamsRankTable[i]}};
                 configs_for_tp[i].subStreamExecConfig = std::move(streamExecutorConfig);
