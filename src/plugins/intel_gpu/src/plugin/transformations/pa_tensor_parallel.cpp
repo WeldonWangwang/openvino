@@ -202,7 +202,7 @@ PATensorParallelFusion::PATensorParallelFusion(size_t world_size, size_t world_r
                         }
                     }
                 }
-                auto output_type = m_pa->get_output_element_type(0);
+                auto output_type = org_fc->get_output_element_type(0);
                 if (compressed_fc) {
                     if (compressed_fc->inputs().size() > 4)
                         splitted_fc = std::make_shared<op::FullyConnectedCompressed>(
@@ -355,14 +355,21 @@ PATensorParallelFusion::PATensorParallelFusion(size_t world_size, size_t world_r
         };
 
         if (m_pa) {
+            auto rt_info = m_pa->get_rt_info();
+            const auto has_rt_params = rt_info.find("k_head_size") != rt_info.end();
             int half_head_num = m_pa->get_input_node_shared_ptr(3)->get_output_partial_shape(0)[1].get_length();
-            int head_size = m_pa->get_input_node_shared_ptr(3)->get_output_partial_shape(0)[2].get_length();
+            // value head size may differ from key head size?
+            int head_size = has_rt_params
+                                ? rt_info.at("k_head_size").as<int64_t>()
+                                : m_pa->get_input_node_shared_ptr(3)->get_output_partial_shape(0)[2].get_length();
             int q_size = m_pa->get_input_node_shared_ptr(0)->get_output_partial_shape(0)[1].get_length();
             int k_size = m_pa->get_input_node_shared_ptr(1)->get_output_partial_shape(0)[1].get_length();
             int v_size = m_pa->get_input_node_shared_ptr(2)->get_output_partial_shape(0)[1].get_length();
             std::vector<int64_t> qkv_parts = {q_size, k_size, v_size};
             int32_t qkv_min_part = *min_element(qkv_parts.begin(), qkv_parts.end());
-            std::for_each(qkv_parts.begin(), qkv_parts.end(), [&](int64_t& d) { d/=qkv_min_part;});
+            std::for_each(qkv_parts.begin(), qkv_parts.end(), [&](int64_t& d) {
+                d /= qkv_min_part;
+            });
             find_first_fcs_before_pa(m_pa);
             for (size_t j = 0; j < vector_visited_fc.size(); j++) {
                 has_visited.clear();

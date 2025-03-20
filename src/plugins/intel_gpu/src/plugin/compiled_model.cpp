@@ -106,7 +106,7 @@ CompiledModel::CompiledModel(std::shared_ptr<ov::Model> model,
                                                                  {configs_for_tp[i].streamsRankTable[i]}};
                 configs_for_tp[i].subStreamExecConfig = std::move(streamExecutorConfig);
                 auto model_clone = model->clone();
-                //ov::serialize(model_clone, "./model_clone_original.xml");
+                ov::serialize(model_clone, "./model_clone_original.xml");
                 //ov::serialize(model_clone, "./model_pa_o.xml", "./model_pa_o.bin");
                 ov::pass::Manager manager;
                 const char* env = getenv("OV_TP_ALLREDUCE_TEST");
@@ -124,6 +124,13 @@ CompiledModel::CompiledModel(std::shared_ptr<ov::Model> model,
                                 op->inputs()[3].get_source_output().get_node_shared_ptr()->get_friendly_name());
                             kvcache_op.insert(
                                 op->inputs()[4].get_source_output().get_node_shared_ptr()->get_friendly_name());
+                            auto& rt_info = op->get_rt_info();
+                            if (rt_info.find("num_k_heads") != rt_info.end()) {
+                                rt_info["num_k_heads"] =
+                                    rt_info.at("num_k_heads").as<int64_t>() / config.get_context_for_tp().size();
+                                rt_info["num_v_heads"] =
+                                    rt_info.at("num_v_heads").as<int64_t>() / config.get_context_for_tp().size();
+                            }
                         }
                     }
                     if (has_pa_op) {
@@ -145,6 +152,7 @@ CompiledModel::CompiledModel(std::shared_ptr<ov::Model> model,
                     if (getenv("OV_ENABLE_LAST_FC"))
                         manager.register_pass<ov::intel_gpu::RemainFCParallelFusion>(config.get_context_for_tp().size(), i);
                     manager.run_passes(model_clone);
+                    ov::serialize(model_clone, "./model_clone_after_pa.xml");
                 }
                 m_sub_compiled_models.push_back(std::make_shared<CompiledModel>(
                     model_clone, plugin, m_config.get_context_for_tp()[i].as<RemoteContextImpl::Ptr>(), configs_for_tp[i], m_sub_memory_manager));
@@ -158,6 +166,8 @@ CompiledModel::CompiledModel(std::shared_ptr<ov::Model> model,
         // clear up the tp executor for async compile
         get_plugin()->get_executor_manager()->clear("async compile executor for TP");
         tp_compile_executor.reset();
+       // m_inputs = m_sub_compiled_models[0]->inputs();
+       // m_outputs = m_sub_compiled_models[0]->outputs();
     }
 }
 
