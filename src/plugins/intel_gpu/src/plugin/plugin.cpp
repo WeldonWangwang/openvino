@@ -155,6 +155,13 @@ std::map<std::string, RemoteContextImpl::Ptr> Plugin::get_default_contexts() con
     return m_default_contexts;
 }
 
+// wrap multi context device into remote context
+RemoteContextImpl::Ptr Plugin::get_multi_device_context(std::string& device_id, cldnn::device::ptr device) const {
+
+    auto ctx = std::make_shared<RemoteContextImpl>(get_device_name() + "." + device_id, std::vector<cldnn::device::ptr>{device});
+    return ctx;
+}
+
 Plugin::Plugin() {
     set_device_name("GPU");
     register_primitives();
@@ -297,10 +304,20 @@ std::shared_ptr<ov::ICompiledModel> Plugin::compile_model(const std::shared_ptr<
             return rank_table;
         };
         if (devices_id_for_tp.size() > 1) {
-            for (auto& device_id : devices_id_for_tp) {
-                config.register_device_context_for_tp(get_default_context(device_id));
-                contexts_for_tp.insert({device_id, get_default_context(device_id)});
-                std::cout << "Registered device with id GPU." << device_id << " for TP." << std::endl;
+            for (size_t index = 0 ; index < devices_id_for_tp.size(); index++) {
+                std::vector<int> device_ids_for_multi_context = {};
+                device_ids_for_multi_context.push_back(std::stoi(devices_id_for_tp[index]));
+                for (size_t i = 0; i < devices_id_for_tp.size(); ++i) {
+                    if (i != index) {
+                        device_ids_for_multi_context.push_back(std::stoi(devices_id_for_tp[i]));
+                    }
+                }
+                cldnn::device_query device_query(cldnn::engine_types::ocl, cldnn::runtime_types::ocl, device_ids_for_multi_context);
+                auto device_for_tp = device_query.get_multi_context_device();
+                auto multi_device_context = get_multi_device_context(devices_id_for_tp[index], device_for_tp);
+                config.register_device_context_for_tp(multi_device_context);
+                contexts_for_tp.insert({devices_id_for_tp[index], multi_device_context});
+                std::cout << "Registered device with id GPU." << devices_id_for_tp[index] << " for TP." << std::endl;
             }
             if (config.get_context_for_tp().size() > 1) {
                 std::cout << "***************************** enable tp *****************************\n";

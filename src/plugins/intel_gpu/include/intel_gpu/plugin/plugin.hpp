@@ -29,6 +29,8 @@ private:
 
     std::map<std::string, std::shared_ptr<RemoteContextImpl>> get_default_contexts() const;
 
+    std::shared_ptr<RemoteContextImpl> get_multi_device_context(std::string& device_id, cldnn::device::ptr) const;
+
     std::shared_ptr<ov::Model> clone_and_transform_model(const std::shared_ptr<const ov::Model>& network,
                                                          const ExecutionConfig& config,
                                                          const std::shared_ptr<RemoteContextImpl>& context) const;

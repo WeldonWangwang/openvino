@@ -23,6 +23,8 @@ public:
 
     static std::vector<device::ptr> sort_devices(const std::vector<device::ptr>& devices_list);
 
+    std::vector<device::ptr> create_device_with_multiple_context(const std::vector<int>& ctx_device_ids) const;
+
 private:
     std::vector<device::ptr> create_device_list() const;
     std::vector<device::ptr> create_device_list_from_user_context(void* user_context, int ctx_device_id = 0) const;

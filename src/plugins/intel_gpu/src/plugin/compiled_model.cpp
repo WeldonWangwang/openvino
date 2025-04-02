@@ -106,7 +106,7 @@ CompiledModel::CompiledModel(std::shared_ptr<ov::Model> model,
                                                                  {configs_for_tp[i].streamsRankTable[i]}};
                 configs_for_tp[i].subStreamExecConfig = std::move(streamExecutorConfig);
                 auto model_clone = model->clone();
-                ov::serialize(model_clone, "./model_clone_original.xml");
+                //ov::serialize(model_clone, "./model_clone_original.xml");
                 //ov::serialize(model_clone, "./model_pa_o.xml", "./model_pa_o.bin");
                 ov::pass::Manager manager;
                 const char* env = getenv("OV_TP_ALLREDUCE_TEST");
@@ -152,7 +152,7 @@ CompiledModel::CompiledModel(std::shared_ptr<ov::Model> model,
                     if (getenv("OV_ENABLE_LAST_FC"))
                         manager.register_pass<ov::intel_gpu::RemainFCParallelFusion>(config.get_context_for_tp().size(), i);
                     manager.run_passes(model_clone);
-                    ov::serialize(model_clone, "./model_clone_after_pa.xml");
+                    //ov::serialize(model_clone, "./model_clone_after_pa.xml");
                 }
                 m_sub_compiled_models.push_back(std::make_shared<CompiledModel>(
                     model_clone, plugin, m_config.get_context_for_tp()[i].as<RemoteContextImpl::Ptr>(), configs_for_tp[i], m_sub_memory_manager));

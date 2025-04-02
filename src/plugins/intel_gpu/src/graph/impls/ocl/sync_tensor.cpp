@@ -22,6 +22,7 @@ namespace cldnn {
 namespace ocl {
 
 #define CL_MEM_ALLOCATION_HANDLE_INTEL 0x10050
+#define CL_MEM_DEVICE_ID_INTEL 0x10011
 static std::map<int, std::string> oclErrorCode = {
     {0, "CL_SUCCESS"},
     {-1, "CL_DEVICE_NOT_FOUND"},
@@ -316,13 +317,15 @@ public:
         return fd;
     }
 
-    cl_mem map_remote_mem(cl_context context, cl_mem clbuf, size_t size) {
+    cl_mem map_remote_mem(cl_context context, cl_device_id device_handle, cl_mem clbuf, size_t size) {
         cl_int err;
         const auto start = perf_dump_start();
         uint64_t fd = derive_handle(clbuf);
         // Create extMemBuffer of type cl_mem from fd.
         cl_mem_properties extMemProperties[] = {(cl_mem_properties)CL_EXTERNAL_MEMORY_HANDLE_DMA_BUF_KHR,
                                                 (cl_mem_properties)fd,
+                                                CL_MEM_DEVICE_ID_INTEL,
+                                                (cl_mem_properties_intel)device_handle,
                                                 0};
         cl_mem extMemBuffer = clCreateBufferWithProperties(context, extMemProperties, 0, size, NULL, &err);
         if (err < 0) {
@@ -338,12 +341,14 @@ public:
         return extMemBuffer;
     }
 
-    cl_mem map_remote_mem(cl_context context, uint64_t fd, size_t size) {
+    cl_mem map_remote_mem(cl_context context,  cl_device_id device_handle, uint64_t fd, size_t size) {
         cl_int err;
         const auto start = perf_dump_start();
         // Create extMemBuffer of type cl_mem from fd.
         cl_mem_properties extMemProperties[] = {(cl_mem_properties)CL_EXTERNAL_MEMORY_HANDLE_DMA_BUF_KHR,
                                                 (cl_mem_properties)fd,
+                                                CL_MEM_DEVICE_ID_INTEL,
+                                                (cl_mem_properties_intel)device_handle,
                                                 0};
         cl_mem extMemBuffer = clCreateBufferWithProperties(context, extMemProperties, 0, size, NULL, &err);
         CHECK_OCL_ERROR(err, "clCreateBufferWithProperties - CL_EXTERNAL_MEMORY_HANDLE_DMA_BUF_KHR failed");
@@ -859,6 +864,8 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
         gpu_p2p_helper& gpu_p2p_instance = get_p2p_instance();
         auto& ocl_stream = downcast<ocl::ocl_stream>(stream);
         auto local_context = ocl_stream.get_engine().get_cl_context().get();
+        cl::Device device = ocl_stream.get_engine().get_cl_device();
+        cl_device_id local_device_handle = device();
         auto p2p_src_layout = instance.get_output_layout(0);
         bool need_update_remote_mems = false;
         if (is_all_reduce) {
@@ -951,7 +958,7 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
                     if (dst_cl_buf) {
                         release_remote_mems(dst_cl_buf);
                     }
-                    dst_cl_buf = gpu_p2p_instance.map_remote_mem(local_context, dst_cl_buf_remote, data_size);
+                    dst_cl_buf = gpu_p2p_instance.map_remote_mem(local_context, local_device_handle, dst_cl_buf_remote, data_size);
                     sub_mem_mgr->_memorys_table[id][w_rank].remote_mems[0] = dst_cl_buf;
                 }
             }
@@ -1298,7 +1305,7 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
                             if (dst_cl_buf) {
                                 release_remote_mems(dst_cl_buf);
                             }
-                            dst_cl_buf = gpu_p2p_instance.map_remote_mem(local_context, dst_cl_buf_remote, data_size);
+                            dst_cl_buf = gpu_p2p_instance.map_remote_mem(local_context, local_device_handle, dst_cl_buf_remote, data_size);
                             sub_mem_mgr->_memorys_table[id][w_rank].remote_mems[idx] = dst_cl_buf;
                         }
                     } else {
@@ -1311,7 +1318,7 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
                             if (dst_cl_buf) {
                                 release_remote_mems(dst_cl_buf);
                             }
-                            dst_cl_buf = gpu_p2p_instance.map_remote_mem(local_context, dst_cl_buf_remote, data_size);
+                            dst_cl_buf = gpu_p2p_instance.map_remote_mem(local_context, local_device_handle, dst_cl_buf_remote, data_size);
                             all_gather_remote_dst[idx] = dst_cl_buf;
                         }
                     }
