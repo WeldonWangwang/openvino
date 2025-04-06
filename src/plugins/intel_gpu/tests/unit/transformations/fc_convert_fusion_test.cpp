@@ -7,6 +7,7 @@
 #include <string>
 #include <memory>
 
+#include <openvino/openvino.hpp>
 #include <openvino/core/model.hpp>
 #include <openvino/pass/manager.hpp>
 #include "common_test_utils/ov_test_utils.hpp"
@@ -20,6 +21,10 @@
 #include "intel_gpu/op/fully_connected.hpp"
 #include "intel_gpu/op/fully_connected_compressed.hpp"
 #include "intel_gpu/op/placeholder.hpp"
+
+#include "openvino/op/add.hpp"
+#include "openvino/op/slice.hpp"
+#include "openvino/op/relu.hpp"
 
 using namespace testing;
 using namespace ov::intel_gpu;

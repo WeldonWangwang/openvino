@@ -55,10 +55,14 @@ Graph::Graph(std::shared_ptr<ov::Model> model, const RemoteContextImpl::Ptr& con
     }
 }
 
-Graph::Graph(cldnn::BinaryInputBuffer &ib, const RemoteContextImpl::Ptr& context, const ExecutionConfig& config, uint16_t stream_id)
-    : m_context(context)
-    , m_config(config)
-    , m_stream_id(stream_id) {
+Graph::Graph(cldnn::BinaryInputBuffer& ib,
+             const RemoteContextImpl::Ptr& context,
+             const ExecutionConfig& config,
+             uint16_t stream_id,
+             const std::shared_ptr<SubMemoryManager> sub_memory_manager)
+    : m_context(context),
+      m_config(config),
+      m_stream_id(stream_id) {
     bool need_onednn_engine = false;
     ib >> need_onednn_engine;
     if (need_onednn_engine) {
@@ -100,8 +104,11 @@ Graph::Graph(cldnn::BinaryInputBuffer &ib, const RemoteContextImpl::Ptr& context
     }
 
     auto imported_prog = std::make_shared<cldnn::program>(get_engine(), m_config);
-    imported_prog->load(ib);
-    build(imported_prog);
+    if (!m_config.enableSubStreams) {
+        imported_prog->load(ib);
+        m_sub_memory_manager = sub_memory_manager;
+        build(imported_prog);
+    }
 }
 
 Graph::Graph(std::shared_ptr<Graph> graph, uint16_t stream_id)

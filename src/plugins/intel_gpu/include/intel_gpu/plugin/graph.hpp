@@ -44,7 +44,11 @@ public:
 
     Graph(std::shared_ptr<ov::Model> model, const RemoteContextImpl::Ptr& context, const ExecutionConfig& config, uint16_t stream_id = 0,
             const std::shared_ptr<SubMemoryManager> sub_memory_manager = nullptr);
-    Graph(cldnn::BinaryInputBuffer& ib, const RemoteContextImpl::Ptr& context, const ExecutionConfig& config, uint16_t stream_id = 0);
+    Graph(cldnn::BinaryInputBuffer& ib,
+          const RemoteContextImpl::Ptr& context,
+          const ExecutionConfig& config,
+          uint16_t stream_id = 0,
+          const std::shared_ptr<SubMemoryManager> sub_memory_manager = nullptr);
     Graph(std::shared_ptr<Graph> graph, uint16_t stream_id = 0);
     ~Graph();
 
