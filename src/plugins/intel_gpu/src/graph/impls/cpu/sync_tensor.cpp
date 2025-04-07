@@ -89,7 +89,7 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
             }
         }
 
-        if (instance.get_impl_params()->need_add) {
+        if (instance.get_impl_params()->all_reduce) {
             std::shared_ptr<ov::op::Op> op;
             ov::TensorVector input_host_tensors;
             ov::TensorVector output_host_tensors;

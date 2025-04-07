@@ -198,7 +198,7 @@ std::shared_ptr<ov::ICompiledModel> Plugin::compile_model(const std::shared_ptr<
     OV_ITT_SCOPED_TASK(itt::domains::intel_gpu_plugin, "Plugin::compile_model");
     std::string device_id = get_device_id(orig_config);
     auto context = get_default_context(device_ids.front());
-
+    std::cout << "!!!!!!!!!!!!!!!!!!!!" << std::endl;
     OPENVINO_ASSERT(m_configs_map.find(device_ids.front()) != m_configs_map.end(), "[GPU] compile_model: Couldn't find config for GPU with id ", m_default_device_id);
 
     ExecutionConfig config = m_configs_map.at(device_ids.front());

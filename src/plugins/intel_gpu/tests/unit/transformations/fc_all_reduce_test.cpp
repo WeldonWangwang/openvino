@@ -38,9 +38,9 @@ TEST(TransformationTestsF1, FullyConnectedSplitInput11) {
     {
         // -------- Construct model
         unsigned long test_size = 2;
-        auto input1 = std::make_shared<ov::op::v0::Parameter>(ov::element::f32, ov::Shape{test_size, test_size});
+        auto input1 = std::make_shared<ov::op::v0::Parameter>(ov::element::f32, ov::Shape{1, 1, test_size, test_size});
         std::vector<float> weights(test_size * test_size, 2);
-        auto input2 = ov::op::v0::Constant::create(ov::element::f32, ov::Shape{test_size, test_size}, {5, 6, 7, 8});
+        auto input2 = ov::op::v0::Constant::create(ov::element::f32, ov::Shape{1, 1, test_size, test_size}, {5, 6, 7, 8});
         std::cout << "\n" << "weights: ";
         for (size_t i = 0; i < input2->get_vector<float>().size(); i++) {
             std::cout << input2->get_vector<float>()[i] << ", ";
@@ -56,7 +56,7 @@ TEST(TransformationTestsF1, FullyConnectedSplitInput11) {
         // -------- Loading a model to the device --------
         ov::Core core;
         // ov::CompiledModel compiled_model = core.compile_model(model, "GPU");
-        ov::CompiledModel compiled_model = core.compile_model(model, "GPU", ov::device::priorities("GPU.0,GPU.1,GPU.2,GPU.3"));
+        ov::CompiledModel compiled_model = core.compile_model(model, "GPU", ov::device::priorities("GPU.0,GPU.1"));
 
         // -------- Create an infer request --------
         ov::InferRequest infer_request = compiled_model.create_infer_request();
