@@ -40,7 +40,7 @@ TEST(TransformationTestsF1, FullyConnectedSplitInput11) {
         unsigned long test_size = 2;
         auto input1 = std::make_shared<ov::op::v0::Parameter>(ov::element::f32, ov::Shape{1, 1, test_size, test_size});
         std::vector<float> weights(test_size * test_size, 2);
-        auto input2 = ov::op::v0::Constant::create(ov::element::f32, ov::Shape{1, 1, test_size, test_size}, {5, 6, 7, 8});
+        auto input2 = ov::op::v0::Constant::create(ov::element::f32, ov::Shape{test_size, test_size}, {5, 6, 7, 8});
         std::cout << "\n" << "weights: ";
         for (size_t i = 0; i < input2->get_vector<float>().size(); i++) {
             std::cout << input2->get_vector<float>()[i] << ", ";

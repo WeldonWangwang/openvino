@@ -21,7 +21,7 @@
 
 namespace cldnn {
 namespace ocl {
-static bool enable_p2p_debug = getenv("OV_TP_P2P_DEBUG");
+static bool enable_p2p_debug = getenv("OV_GPU_P2P_DEBUG");
 static std::mutex debug_mutex;
 class Timer {
 public:
@@ -36,7 +36,7 @@ public:
     void measure_start(std::string msg) {
         if (this->mark_timers) {
             std::lock_guard<std::mutex> lock(debug_mutex);
-            std::cout << "[rank:] " << my_rank << " stage : " << msg << " TIME START " <<std::endl;
+            std::cout << "[rank:] " << my_rank << " stage : " << msg << " TIME START " << std::endl;
         }
         start_time = Clock::now();
     }
@@ -67,31 +67,6 @@ private:
 #define CL_MEM_ALLOCATION_HANDLE_INTEL 0x10050
 #define CL_MEM_DEVICE_ID_INTEL         0x10011
 
-class gpu_semaphore {
-public:
-    gpu_semaphore(int count = 1) : count_(count), total_(count) {}
-    void signal() {
-        std::unique_lock<std::mutex> lock(mutex_);
-        if (count_ < total_)
-            ++count_;
-        cv_.notify_one();
-    }
-    void acquire() {
-        std::unique_lock<std::mutex> lock(mutex_);
-        cv_.wait(lock, [&] {
-            return count_ > 0;
-        });
-        --count_;
-    }
-
-private:
-    std::mutex mutex_;
-    std::condition_variable cv_;
-    int count_;
-    int total_;
-};
-
-static gpu_semaphore gpu_lock;
 class tensor_concat_memory {
 public:
     tensor_concat_memory() : buf(nullptr), width(0), height(0), type(ov::element::f16) {}
@@ -114,9 +89,10 @@ public:
 
     void get_mem_info() const {
         size_t data_size = 0;
-        cl::detail::errHandler(clGetMemObjectInfo(buf, CL_MEM_SIZE, sizeof(size_t), &data_size, NULL), "cl_get_mem_obj_info");
+        cl::detail::errHandler(clGetMemObjectInfo(buf, CL_MEM_SIZE, sizeof(size_t), &data_size, NULL),
+                               "cl_get_mem_obj_info");
         GPU_DEBUG_TRACE_DETAIL << "width = " << width << ", height = " << height << ", stride = " << stride
-                  << ", type = " << type.to_string() << " -- actual_size = " << data_size << std::endl;
+                               << ", type = " << type.to_string() << " -- actual_size = " << data_size << std::endl;
     }
 
     cl_mem buf;
@@ -176,34 +152,36 @@ public:
             // Vertical concat
             dst_rec[1] = src->height * w_rank;
             cl::detail::errHandler(clEnqueueCopyBufferRect(queue,
-                                               src->buf,
-                                               dst->buf,
-                                               src_rec,
-                                               dst_rec,
-                                               rect,
-                                               src->stride,
-                                               src->height * src->stride,
-                                               dst->stride,
-                                               dst->stride * dst->width,
-                                               0,
-                                               nullptr,
-                                               &event), "clEnqueueCopyBufferRect");
+                                                           src->buf,
+                                                           dst->buf,
+                                                           src_rec,
+                                                           dst_rec,
+                                                           rect,
+                                                           src->stride,
+                                                           src->height * src->stride,
+                                                           dst->stride,
+                                                           dst->stride * dst->width,
+                                                           0,
+                                                           nullptr,
+                                                           &event),
+                                   "clEnqueueCopyBufferRect");
         } else if (concat_mode == 1) {
             // Horizontal concat
             dst_rec[0] = src->width * w_rank;
             cl::detail::errHandler(clEnqueueCopyBufferRect(queue,
-                                               src->buf,
-                                               dst->buf,
-                                               src_rec,
-                                               dst_rec,
-                                               rect,
-                                               src->stride,
-                                               src->height * src->stride,
-                                               dst->stride,
-                                               dst->stride * dst->width,
-                                               0,
-                                               nullptr,
-                                               &event), "clEnqueueCopyBufferRect");
+                                                           src->buf,
+                                                           dst->buf,
+                                                           src_rec,
+                                                           dst_rec,
+                                                           rect,
+                                                           src->stride,
+                                                           src->height * src->stride,
+                                                           dst->stride,
+                                                           dst->stride * dst->width,
+                                                           0,
+                                                           nullptr,
+                                                           &event),
+                                   "clEnqueueCopyBufferRect");
         } else {
             OPENVINO_THROW("tensor_concat failed: incorrect concat mode!");
         }
@@ -216,7 +194,8 @@ public:
         return sync_event;
     }
 
-    void get_mem_info(const std::shared_ptr<tensor_concat_memory>& src, const std::shared_ptr<tensor_concat_memory>& dst) {
+    void get_mem_info(const std::shared_ptr<tensor_concat_memory>& src,
+                      const std::shared_ptr<tensor_concat_memory>& dst) {
         src->get_mem_info();
         dst->get_mem_info();
     }
@@ -234,18 +213,19 @@ public:
 
     cl_mem map_remote_mem(cl_context context, cl_device_id device_handle, cl_mem clbuf, size_t size) {
         cl_int err;
-        //std::cout << "trying to derive handle from " << clbuf << "size is " << size << std::endl;
+        // std::cout << "trying to derive handle from " << clbuf << "size is " << size << std::endl;
         uint64_t fd;
-        cl::detail::errHandler(clGetMemObjectInfo(clbuf, CL_MEM_ALLOCATION_HANDLE_INTEL, sizeof(fd), &fd, NULL), "cl_get_mem_obj_info");
-        //std::cout << "finished to derive handle from " << clbuf << "handle is " << fd << std::endl;
-        // Create extMemBuffer of type cl_mem from fd.
+        cl::detail::errHandler(clGetMemObjectInfo(clbuf, CL_MEM_ALLOCATION_HANDLE_INTEL, sizeof(fd), &fd, NULL),
+                               "cl_get_mem_obj_info");
+        // std::cout << "finished to derive handle from " << clbuf << "handle is " << fd << std::endl;
+        //  Create extMemBuffer of type cl_mem from fd.
         cl_mem_properties extMemProperties[] = {(cl_mem_properties)CL_EXTERNAL_MEMORY_HANDLE_DMA_BUF_KHR,
                                                 (cl_mem_properties)fd,
                                                 CL_MEM_DEVICE_ID_INTEL,
                                                 (cl_mem_properties_intel)device_handle,
                                                 0};
         cl_mem extMemBuffer = clCreateBufferWithProperties(context, extMemProperties, 0, size, NULL, &err);
-        //std::cout << "finished to create buffer with handle " << fd << "mem is " << extMemBuffer << std::endl;
+        // std::cout << "finished to create buffer with handle " << fd << "mem is " << extMemBuffer << std::endl;
         if (err < 0) {
             OPENVINO_ASSERT(false,
                             "clCreateBufferWithProperties failed, clbuf = %p, fd = %ld, size = %ld, new_cl_mem = %p\n",
@@ -356,7 +336,7 @@ public:
             size_t logsize = 0;
             auto device = ocl_stream.get_engine().get_cl_device().get();
             err = clGetProgramBuildInfo(program, device, CL_PROGRAM_BUILD_LOG, 0, NULL, &logsize);
-            //CHECK_OCL_ERROR(err, "clGetProgramBuildInfo failed");
+            // CHECK_OCL_ERROR(err, "clGetProgramBuildInfo failed");
 
             std::vector<char> logbuf(logsize + 1, 0);
             err = clGetProgramBuildInfo(program, device, CL_PROGRAM_BUILD_LOG, logsize + 1, logbuf.data(), NULL);
@@ -369,8 +349,6 @@ public:
 
     cl_kernel get_or_create_kernel_if_possible_sub(cldnn::stream& stream,
                                                    kernel_data_type type,
-                                                   size_t width,
-                                                   size_t width_sub,
                                                    size_t offset) {
         std::lock_guard<std::mutex> lock(mutex);
         auto it = kernels.find(type);
@@ -378,13 +356,13 @@ public:
             return it->second;
         }
 
-    #define ADD_OP_KERNEL_SOURCE_CODE(DATA_TYPE)                                                            \
-        "kernel void tensor_add_kernel_" #DATA_TYPE " (const global " #DATA_TYPE " *src, global " #DATA_TYPE \
-        " *dst, int width, int width_sub, int offset) {"                                                    \
-        "const int id = get_global_id(0);"                                                                  \
-        "const int idx = id + offset;"                                                                      \
-        "dst[idx] += src[id];"                                                                              \
-        "}"
+#define ADD_OP_KERNEL_SOURCE_CODE(DATA_TYPE)                                                             \
+    "kernel void tensor_add_kernel_" #DATA_TYPE " (const global " #DATA_TYPE " *src, global " #DATA_TYPE \
+    " *dst, int offset) {"                                                     \
+    "const int id = get_global_id(0);"                                                                   \
+    "const int idx = id + offset;"                                                                       \
+    "dst[idx] += src[id];"                                                                               \
+    "}"
         if (type == kernel_data_type::e_type_fp16) {
             const char tensor_add_kernel_fp16[] = ADD_OP_KERNEL_SOURCE_CODE(half);
             const char kernel_name[] = "tensor_add_kernel_half";
@@ -412,8 +390,6 @@ public:
                               cl_mem dst,
                               size_t element_count,
                               kernel_data_type data_type,
-                              size_t width,
-                              size_t width_sub,
                               size_t offset) {
         cl_int err;
         auto& ocl_stream = downcast<ocl::ocl_stream>(stream);
@@ -424,19 +400,13 @@ public:
 
         cl_kernel kernel = get_or_create_kernel_if_possible_sub(stream,
                                                                 data_type,
-                                                                static_cast<int>(width),
-                                                                static_cast<int>(width_sub),
                                                                 static_cast<int>(offset));
 
         err = clSetKernelArg(kernel, 0, sizeof(cl_mem), &src);
 
         err = clSetKernelArg(kernel, 1, sizeof(cl_mem), &dst);
 
-        err = clSetKernelArg(kernel, 2, sizeof(int), &width);
-
-        err = clSetKernelArg(kernel, 3, sizeof(int), &width_sub);
-
-        err = clSetKernelArg(kernel, 4, sizeof(int), &offset);
+        err = clSetKernelArg(kernel, 2, sizeof(int), &offset);
 
         size_t global_size[] = {element_count};
         auto queue = ocl_stream.get_cl_queue().get();
@@ -513,33 +483,21 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
                                 cldnn::layout& last_layout,
                                 cldnn::layout& layout,
                                 size_t w_size,
-                                size_t w_rank,
-                                int all_reduce_solution) {
+                                size_t w_rank) {
         auto& engine = instance.get_network().get_engine();
         auto& ocl_engine = downcast<ocl::ocl_engine>(engine);
         size_t required_size = layout.bytes_count();
         bool allocated = false;
 
         auto need_realloc = [&](size_t idx) {
-            if (all_reduce_solution == 2) {
-                if (idx != 1)
-                    return false;
-
-            } else {
-                if (idx == w_rank)
-                    return false;
-            }
+            if (idx != 1)
+                return false;
 
             if (bufs[idx] == nullptr || last_layout.bytes_count() == 0)
                 return true;
 
-            if (all_reduce_solution == 2) {
-                if (bufs[idx]->size() * w_size < required_size)
-                    return true;
-            } else {
-                if (bufs[idx]->size() < required_size)
-                    return true;
-            }
+            if (bufs[idx]->size() * w_size < required_size)
+                return true;
 
             // Batch has been changed to smaller, need reallocate to decrease memory.
             auto last_batch = last_layout.batch() * last_layout.feature();
@@ -554,29 +512,26 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
             }
             // size_t origin_size = bufs[i] != nullptr ? bufs[i]->size() : 0;
             bufs[i] = nullptr;
-            if (all_reduce_solution == 2) {
-                auto width = layout.get_shape()[-1];
-                auto sub_width = width / w_size;
-                if (sub_width * w_size != width)
-                    GPU_DEBUG_TRACE_DETAIL << "[Warning] the shape of FC output has ODD number!!!";
-                auto sub_layout = layout;
-                auto sub_shape = layout.get_shape();
-                sub_shape[-1] = sub_width;
-                sub_layout.set_partial_shape(sub_shape);
+            auto width = layout.get_shape()[-1];
+            auto sub_width = width / w_size;
+            if (sub_width * w_size != width)
+                GPU_DEBUG_TRACE_DETAIL << "[Warning] the shape of FC output has ODD number!!!";
+            auto sub_layout = layout;
+            auto sub_shape = layout.get_shape();
+            sub_shape[-1] = sub_width;
+            sub_layout.set_partial_shape(sub_shape);
 
-                // Create extMemBuffer of type cl_mem from fd.
-                cl_mem_properties extMemProperties[] = {
-                    CL_MEM_FLAGS,
-                    CL_MEM_READ_WRITE | CL_MEM_ALLOW_UNRESTRICTED_SIZE_INTEL,
-                    CL_MEM_DEVICE_ID_INTEL,
-                    (cl_mem_properties_intel)handle,
-                    0,
-                };
-                auto local_mem = clCreateBufferWithProperties(context, extMemProperties, 0, sub_layout.bytes_count(), NULL, NULL);
-                bufs[i] = std::make_shared<ocl::gpu_buffer>(&ocl_engine, sub_layout, cl::Buffer(local_mem, true), nullptr);
-            } else {
-                bufs[i] = engine.allocate_memory(layout, cldnn::allocation_type::cl_mem, false);
-            }
+            // Create extMemBuffer of type cl_mem from fd.
+            cl_mem_properties extMemProperties[] = {
+                CL_MEM_FLAGS,
+                CL_MEM_READ_WRITE | CL_MEM_ALLOW_UNRESTRICTED_SIZE_INTEL,
+                CL_MEM_DEVICE_ID_INTEL,
+                (cl_mem_properties_intel)handle,
+                0,
+            };
+            auto local_mem =
+                clCreateBufferWithProperties(context, extMemProperties, 0, sub_layout.bytes_count(), NULL, NULL);
+            bufs[i] = std::make_shared<ocl::gpu_buffer>(&ocl_engine, sub_layout, cl::Buffer(local_mem, true), nullptr);
             allocated = true;
         }
         return allocated;
@@ -593,25 +548,22 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
 
     event::ptr execute_impl(const std::vector<event::ptr>& events, sync_tensor_inst& instance) override {
         OV_ITT_SCOPED_TASK(ov::intel_gpu::itt::domains::intel_gpu_plugin, "sync_tensor::execute_impl");
-        auto& stream = instance.get_network().get_stream();
-        const bool pass_through_events = false;
+        auto& local_stream = instance.get_network().get_stream();
         auto w_rank = instance.get_network().get_program()->get_config().subStreamExecConfig.get_rank()[0];
         auto w_size = instance.get_network().get_program()->get_config().get_context_for_tp().size();
+        gpu_p2p_helper& gpu_p2p_instance = get_p2p_instance();
+        auto& ocl_stream = downcast<ocl::ocl_stream>(local_stream);
+        auto local_queue = ocl_stream.get_cl_queue().get();                        // raw cl queue
+        auto local_context = ocl_stream.get_engine().get_cl_context().get();       // raw cl context
+        auto local_device_handle = ocl_stream.get_engine().get_cl_device().get();  // raw cl device
+        auto dst_idx = (w_rank + 1) % w_size;                                      // peer for p2p of current rank in ring all_reduce
         Timer timer(w_rank);
         auto is_all_reduce = instance.get_impl_params()->all_reduce == true;
         if (!is_all_reduce && all_gather_remote_dst.size() == 0) {
             all_gather_remote_dst.assign(w_size, nullptr);
         }
-
-        int all_reduce_solution = 2;
-        if (is_all_reduce) {
-            const char* all_reduce_add_solution = getenv("OV_TP_ALLREDUCE_ADD_solution");
-            if (all_reduce_add_solution)
-                all_reduce_solution = std::atoi(all_reduce_add_solution);
-        }
-
+        // use ring all-reduce solution to implement
         timer.measure_start(std::string("prepare for sync for mem manager"));
-
         auto sub_mem_mgr = instance.get_network().get_sub_mem_mgr();
         auto id = sub_mem_mgr->get_memory_id(w_rank);
         sub_mem_mgr->set_memory_used(id, w_rank);
@@ -638,20 +590,13 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
             }
         }
         timer.measure_end(std::string("prepare for sync for mem manager"));
-        timer.measure_start(std::string("prepare for sync for local memory allocation and remote mapping"));
-        gpu_p2p_helper& gpu_p2p_instance = get_p2p_instance();
-        auto& ocl_stream = downcast<ocl::ocl_stream>(stream);
-        auto local_context = ocl_stream.get_engine().get_cl_context().get();
-        cl::Device device = ocl_stream.get_engine().get_cl_device();
-        cl_device_id local_device_handle = device();
+        timer.measure_start(std::string("prepare for sync for local memory allocation"));
+
         auto p2p_src_layout = instance.get_output_layout(0);
         bool need_update_remote_mems = false;
         if (is_all_reduce) {
             OPENVINO_ASSERT(1 == instance.get_output_memorys().size(), "All reduce only has one output!");
-            if (all_reduce_solution == 2)
-                sub_mem_mgr->_memorys_table[id][w_rank].recv_bufs[0] = instance.get_output_memorys()[0];
-            else
-                sub_mem_mgr->_memorys_table[id][w_rank].recv_bufs[w_rank] = instance.get_output_memorys()[0];
+            sub_mem_mgr->_memorys_table[id][w_rank].recv_bufs[0] = instance.get_output_memorys()[0];
             sub_mem_mgr->_memorys_table[id][w_rank].output = instance.get_output_memorys()[0];
             // Allocate or reuse buffer for P2P target, same shape with output[0]
             p2p_src_layout = instance.get_output_layout(0);
@@ -662,8 +607,7 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
                                                              sub_mem_mgr->_memorys_table[id][w_rank].layout,
                                                              p2p_src_layout,
                                                              w_size,
-                                                             w_rank,
-                                                             all_reduce_solution);
+                                                             w_rank);
         } else {
             OPENVINO_ASSERT(2 == instance.get_output_memorys().size(),
                             "All gather need additional buffer for concat result!");
@@ -677,17 +621,15 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
             }
         }
 
-        if (all_reduce_solution == 2) {
-            sub_mem_mgr->_memorys_table[id][w_rank].recv_flag[0] = true;
-            sub_mem_mgr->_memorys_table[id][w_rank].recv_flag_concat[0] = true;
-            sub_mem_mgr->_memorys_table[id][w_rank].add_flag_concat[0] = true;
-        } else {
-            sub_mem_mgr->_memorys_table[id][w_rank].flag = true;
-        }
+        sub_mem_mgr->_memorys_table[id][w_rank].recv_flag[0] = true;
+        sub_mem_mgr->_memorys_table[id][w_rank].recv_flag_concat[0] = true;
+        sub_mem_mgr->_memorys_table[id][w_rank].add_flag_concat[0] = true;
         sub_mem_mgr->_memorys_table[id][w_rank].flag = true;
-
+        timer.measure_end(std::string("prepare for sync for local memory allocation"));
+        timer.measure_start(std::string("prepare for remote memory mapping"));
         std::vector<cldnn::event::ptr> sync_events;
-        if (is_all_reduce && all_reduce_solution == 2) {
+        if (is_all_reduce) {
+            // wait for peer memory ready
             while (true) {
                 size_t wait_all_ouput_ready = 0;
                 for (int idx = 0; idx < static_cast<int>(w_size); idx++) {
@@ -700,7 +642,7 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
             }
             auto split_parts = [](int len, int n) {
                 int average = len / n;
-                std::vector<int> parts(n, average);
+                std::vector<size_t> parts(n, average);
                 parts.back() = len - average * (n - 1);
                 return parts;
             };
@@ -708,9 +650,11 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
             auto output_layout = instance.get_output_layout(0);
             ov::element::Type output_element_type = output_layout.data_type;
             auto output_element_size = output_element_type.size();
-            auto output_shape = output_layout.get_shape();
-            auto sub_out_dim_vec = split_parts(output_shape[-1], w_size);
-            auto output_height = ov::shape_size(output_shape) / output_shape[-1];
+            auto slice_pitch = output_layout.bytes_count();
+            auto chunk_size = split_parts(slice_pitch, w_size);
+            auto src_width = output_layout.get_shape()[-1];
+            auto src_height = output_layout.count() / src_width;
+            auto dst_height = src_height;
             // Prepare CL memory mapping for P2P copying next
             {
                 auto dst_idx = (w_rank + 1) % w_size;
@@ -725,8 +669,8 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
                 if (need_update_remote_mems) {
                     if (enable_p2p_debug) {
                         GPU_DEBUG_TRACE_DETAIL << "release_remote_mems: old_layout = "
-                                  << sub_mem_mgr->_memorys_table[id][w_rank].layout.to_short_string()
-                                  << ", new_layout = " << p2p_src_layout.to_short_string();
+                                               << sub_mem_mgr->_memorys_table[id][w_rank].layout.to_short_string()
+                                               << ", new_layout = " << p2p_src_layout.to_short_string();
                     }
                 }
 
@@ -741,35 +685,36 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
                     sub_mem_mgr->_memorys_table[id][w_rank].remote_mems[0] = dst_cl_buf;
                 }
             }
-            timer.measure_end(std::string("prepare for sync for local memory allocation and remote maping"));
-            timer.measure_start(std::string("sub buffer copy and add"));
-            // Start loop for sub buff copy & add
-            for (int32_t i = 0; i < static_cast<int>(w_size) - 1; i++) {
+            timer.measure_end(std::string("prepare for remote memory maping"));
+            timer.measure_start(std::string("scatter stage for Ring all-reduce"));
+            // scatter stage for Ring all-reduce
+            for (int32_t step = 0; step < static_cast<int>(w_size) - 1; step++) {
                 auto src_mem = std::dynamic_pointer_cast<const ocl::gpu_buffer>(
                     sub_mem_mgr->_memorys_table[id][w_rank].recv_bufs[0]);
                 auto src_buf = src_mem->get_buffer().get();
 
-                int32_t sub_part = (w_rank - i) >= 0 ? (w_rank - i) : ((w_rank - i) + w_size);
-                int32_t rec_sub_part = (sub_part - 1) >= 0 ? (sub_part - 1) : ((sub_part - 1) + w_size);
-                auto dst_idx = (w_rank + 1) % w_size;
+                int32_t send_chunk_idx = (w_rank - step + w_size) % w_size;
+                int32_t target_chunk_idx = (w_rank - step - 1 + w_size) % w_size;
+                auto next_rank_idx = (w_rank + 1) % w_size;
 
-                auto dst_cl_buf = static_cast<cl_mem>(sub_mem_mgr->_memorys_table[id][w_rank].remote_mems[0]);
+                auto dst_cl_buf = static_cast<cl_mem>(sub_mem_mgr->_memorys_table[id][w_rank]
+                                                          .remote_mems[0]);  // mapped from remote memory of target rank
 
-                auto& ocl_stream = downcast<ocl::ocl_stream>(stream);
-                auto queue = ocl_stream.get_cl_queue().get();
-                int32_t off_set = 0;
-                for (int32_t j = 0; j < sub_part; j++) {
-                    off_set = off_set + sub_out_dim_vec[j];
+                size_t src_off_set = 0;
+                for (int32_t j = 0; j < send_chunk_idx; j++) {
+                    src_off_set = src_off_set + chunk_size[j];
                 }
-                size_t src_rec[3] = {off_set * output_element_size * output_height, 0, 0};
-                size_t dst_rec[3] = {0, 0, 0};
+                // view the tensor as 1D
+                size_t src_region[3] = {src_off_set, 0, 0}; // start address of src orgin
+                size_t dst_region[3] = {0, 0, 0}; // dst with no padding
                 cl_event event;
-                size_t rect[3] = {sub_out_dim_vec[sub_part] * output_element_size, output_height, 1};
-                auto ret = clEnqueueCopyBufferRect(queue,
+                size_t rect[3] = {chunk_size[send_chunk_idx] / dst_height, dst_height, 1};
+
+                auto ret = clEnqueueCopyBufferRect(local_queue,
                                                    src_buf,
                                                    dst_cl_buf,
-                                                   src_rec,
-                                                   dst_rec,
+                                                   src_region,
+                                                   dst_region,
                                                    rect,
                                                    0,
                                                    0,
@@ -779,18 +724,16 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
                                                    nullptr,
                                                    &event);
                 if (ret != CL_SUCCESS) {
-                    GPU_DEBUG_TRACE_DETAIL << "0.clEnqueueCopyBufferRect failed: " << ", idx = " << i;
-                    OPENVINO_THROW("0.clEnqueueCopyBufferRect failed:");
+                    GPU_DEBUG_TRACE_DETAIL << "scatter stage clEnqueueCopyBufferRect failed: " << ", step = " << step;
+                    OPENVINO_THROW("scatter stage in syn tensor failed");
                 }
                 ret = clWaitForEvents(1, &event);
-                //CHECK_OCL_ERROR(ret, "clWaitForEvents failed");
                 clReleaseEvent(event);
-
-                sub_mem_mgr->_memorys_table[id][dst_idx].recv_flag[i + 1] = true;
+                sub_mem_mgr->_memorys_table[id][next_rank_idx].recv_flag[step + 1] = true;
                 while (true) {
                     size_t wait_all_ouput_ready = 0;
                     for (int idx = 0; idx < static_cast<int>(w_size); idx++) {
-                        if (sub_mem_mgr->_memorys_table[id][idx].recv_flag[i + 1] == true)
+                        if (sub_mem_mgr->_memorys_table[id][idx].recv_flag[step + 1] == true)
                             wait_all_ouput_ready++;
                     }
                     if (wait_all_ouput_ready == w_size)
@@ -805,58 +748,50 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
                 auto src_mem_add = sub_mem_mgr->_memorys_table[id][w_rank].recv_bufs[1];
                 auto src_cl_buf_add = std::dynamic_pointer_cast<const ocl::gpu_buffer>(src_mem_add)->get_buffer().get();
 
-                int32_t off_set_add = 0;
-                for (int32_t j = 0; j < rec_sub_part; j++)
-                    off_set_add = off_set_add + sub_out_dim_vec[j];
+                size_t off_set_add = 0;
+                for (int32_t j = 0; j < target_chunk_idx; j++)
+                    off_set_add = off_set_add + chunk_size[j];
 
                 cldnn::event::ptr sync_add_event;
                 sync_add_event = adder_instance.tensor_add_sub(
-                    stream,
+                    local_stream,
                     src_cl_buf_add,
                     dst_cl_buf_add,
-                    output_height * sub_out_dim_vec[rec_sub_part],
+                    chunk_size[target_chunk_idx] / output_element_size,
                     adder_instance.element_type_to_kernel_data_type(dst_mem_add->get_layout().data_type),
-                    output_shape[-1],
-                    sub_out_dim_vec[rec_sub_part],
-                    output_height * off_set_add);
+                    off_set_add / output_element_size);
                 sync_add_event->wait();
-
-                sub_mem_mgr->_memorys_table[id][w_rank].add_flag[i + 1] = true;
+                sub_mem_mgr->_memorys_table[id][w_rank].add_flag[step + 1] = true;
                 while (true) {
                     size_t wait_all_ouput_ready = 0;
                     for (int idx = 0; idx < static_cast<int>(w_size); idx++) {
-                        if (sub_mem_mgr->_memorys_table[id][idx].add_flag[i + 1] == true)
+                        if (sub_mem_mgr->_memorys_table[id][idx].add_flag[step + 1] == true)
                             wait_all_ouput_ready++;
                     }
                     if (wait_all_ouput_ready == w_size)
                         break;
                 }
             }
-            timer.measure_end(std::string("sub buffer copy and add"));
-            timer.measure_start(std::string("remaining 2 copys"));
-            for (int32_t i = 0; i < static_cast<int>(w_size) - 1; i++) {
-                int32_t sub_part = (w_rank - i + 1) % w_size;
-                int32_t rec_sub_part = (sub_part - 1) < 0 ? (w_size - 1) : (sub_part - 1) % w_size;
+            timer.measure_end(std::string("scatter stage for Ring all-reduce"));
+            timer.measure_start(std::string("gather stage for Ring all-reduce"));
+            for (int32_t step = 0; step < static_cast<int>(w_size) - 1; step++) {
+                int32_t send_chunk_idx = (w_rank - step + 1) % w_size;
+                int32_t recv_chunk_idx = (w_rank - step) % w_size;
                 {
                     auto src_mem = std::dynamic_pointer_cast<const ocl::gpu_buffer>(
                         sub_mem_mgr->_memorys_table[id][w_rank].recv_bufs[0]);
                     auto src_buf = src_mem->get_buffer().get();
 
-                    auto dst_idx = (w_rank + 1) % w_size;
-                    cl_mem dst_cl_buf = nullptr;
-                    dst_cl_buf = static_cast<cl_mem>(sub_mem_mgr->_memorys_table[id][w_rank].remote_mems[0]);
-
-                    auto& ocl_stream = downcast<ocl::ocl_stream>(stream);
-                    auto queue = ocl_stream.get_cl_queue().get();
-                    int32_t off_set = 0;
-                    for (int32_t j = 0; j < sub_part; j++) {
-                        off_set = off_set + sub_out_dim_vec[j];
+                    cl_mem dst_cl_buf = static_cast<cl_mem>(sub_mem_mgr->_memorys_table[id][w_rank].remote_mems[0]);
+                    size_t off_set = 0;
+                    for (int32_t j = 0; j < send_chunk_idx; j++) {
+                        off_set = off_set + chunk_size[j];
                     }
-                    size_t src_rec[3] = {off_set * output_element_size * output_height, 0, 0};
+                    size_t src_rec[3] = {off_set, 0, 0};
                     size_t dst_rec[3] = {0, 0, 0};
                     cl_event event;
-                    size_t rect[3] = {sub_out_dim_vec[sub_part] * output_element_size, output_height, 1};
-                    auto ret = clEnqueueCopyBufferRect(queue,
+                    size_t rect[3] = {chunk_size[send_chunk_idx] / dst_height, dst_height, 1};
+                    auto ret = clEnqueueCopyBufferRect(local_queue,
                                                        src_buf,
                                                        dst_cl_buf,
                                                        src_rec,
@@ -870,18 +805,16 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
                                                        nullptr,
                                                        &event);
                     if (ret != CL_SUCCESS) {
-                        GPU_DEBUG_TRACE_DETAIL << "0.clEnqueueCopyBufferRect failed: " << ", idx = " << i;
-                        OPENVINO_THROW("0.clEnqueueCopyBufferRect failed: ");
+                        GPU_DEBUG_TRACE_DETAIL << "broadcast of gather stage clEnqueueCopyBufferRect failed: " << ", step = " << step;
+                        OPENVINO_THROW("broadcast stage in sync tensor failed: ");
                     }
                     ret = clWaitForEvents(1, &event);
-                    //CHECK_OCL_ERROR(ret, "clWaitForEvents failed");
                     clReleaseEvent(event);
-
-                    sub_mem_mgr->_memorys_table[id][dst_idx].recv_flag_concat[i + 1] = true;
+                    sub_mem_mgr->_memorys_table[id][dst_idx].recv_flag_concat[step + 1] = true;
                     while (true) {
                         size_t wait_all_ouput_ready = 0;
                         for (int idx = 0; idx < static_cast<int>(w_size); idx++) {
-                            if (sub_mem_mgr->_memorys_table[id][idx].recv_flag_concat[i + 1] == true) {
+                            if (sub_mem_mgr->_memorys_table[id][idx].recv_flag_concat[step + 1] == true) {
                                 wait_all_ouput_ready++;
                             }
                         }
@@ -889,7 +822,6 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
                             break;
                     }
                 }
-
                 {
                     auto dst_mem_add = std::dynamic_pointer_cast<const ocl::gpu_buffer>(
                         sub_mem_mgr->_memorys_table[id][w_rank].recv_bufs[0]);
@@ -898,18 +830,15 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
                     auto src_mem_add = sub_mem_mgr->_memorys_table[id][w_rank].recv_bufs[1];
                     auto src_cl_buf_add =
                         std::dynamic_pointer_cast<const ocl::gpu_buffer>(src_mem_add)->get_buffer().get();
-
-                    int32_t off_set = 0;
-                    for (int32_t j = 0; j < rec_sub_part; j++) {
-                        off_set = off_set + sub_out_dim_vec[j];
+                    size_t off_set = 0;
+                    for (int32_t j = 0; j < recv_chunk_idx; j++) {
+                        off_set = off_set + chunk_size[j];
                     }
-                    size_t dst_rec[3] = {off_set * output_element_size * output_height, 0, 0};
+                    size_t dst_rec[3] = {off_set, 0, 0};
                     size_t src_rec[3] = {0, 0, 0};
-                    auto& ocl_stream = downcast<ocl::ocl_stream>(stream);
-                    auto queue = ocl_stream.get_cl_queue().get();
                     cl_event event;
-                    size_t rect[3] = {sub_out_dim_vec[rec_sub_part] * output_element_size, output_height, 1};
-                    auto ret = clEnqueueCopyBufferRect(queue,
+                    size_t rect[3] = {chunk_size[recv_chunk_idx] / dst_height, dst_height, 1};
+                    auto ret = clEnqueueCopyBufferRect(local_queue,
                                                        src_cl_buf_add,
                                                        dst_cl_buf_add,
                                                        src_rec,
@@ -923,18 +852,17 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
                                                        nullptr,
                                                        &event);
                     if (ret != CL_SUCCESS) {
-                        GPU_DEBUG_TRACE_DETAIL << "0.clEnqueueCopyBufferRect failed: " << ", idx = " << i;
-                        OPENVINO_THROW("0.clEnqueueCopyBufferRect failed: ");
+                        GPU_DEBUG_TRACE_DETAIL << "gather stage clEnqueueCopyBufferRect failed: " << ", step = " << step;
+                        OPENVINO_THROW("gather stage of sync tensor failed: ");
                     }
                     ret = clWaitForEvents(1, &event);
-                    //CHECK_OCL_ERROR(ret, "clWaitForEvents failed");
                     clReleaseEvent(event);
 
-                    sub_mem_mgr->_memorys_table[id][w_rank].add_flag_concat[i + 1] = true;
+                    sub_mem_mgr->_memorys_table[id][w_rank].add_flag_concat[step + 1] = true;
                     while (true) {
                         size_t wait_all_ouput_ready = 0;
                         for (int idx = 0; idx < static_cast<int>(w_size); idx++) {
-                            if (sub_mem_mgr->_memorys_table[id][idx].add_flag_concat[i + 1] == true) {
+                            if (sub_mem_mgr->_memorys_table[id][idx].add_flag_concat[step + 1] == true) {
                                 wait_all_ouput_ready++;
                             }
                         }
@@ -943,7 +871,7 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
                     }
                 }
             }
-            timer.measure_end(std::string("remaining 2 copys"));
+            timer.measure_end(std::string("gather stage for Ring all-reduce"));
         } else {
             while (true) {
                 size_t wait_all_ouput_ready = 0;
@@ -959,7 +887,7 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
             auto src_p2p_buf = std::dynamic_pointer_cast<const ocl::gpu_buffer>(instance.get_output_memorys()[1]);
             auto src_cl_buf = src_p2p_buf->get_buffer().get();
 
-            auto& ocl_stream = downcast<ocl::ocl_stream>(stream);
+            auto& ocl_stream = downcast<ocl::ocl_stream>(local_stream);
             auto queue = ocl_stream.get_cl_queue().get();
 
             auto split_parts = [](int len, int n) {
@@ -1047,13 +975,6 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
                     break;
             }
         }
-        if (pass_through_events) {
-            if (events.size() > 1) {
-                return stream.group_events(events);
-            } else if (events.size() == 1) {
-                return events[0];
-            }
-        }
 
         // This block MUST be put exactly at the end of this method.
         {
@@ -1061,7 +982,7 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
             sub_mem_mgr->_memorys_table[id][w_rank].layout = p2p_src_layout;
             sub_mem_mgr->_use_count[id]++;
         }
-        return sync_events.size() > 0 ? stream.group_events(sync_events) : stream.create_user_event(true);
+        return sync_events.size() > 0 ? local_stream.group_events(sync_events) : local_stream.create_user_event(true);
     }
 
     void init_kernels(const kernels_cache&, const kernel_impl_params&) override {}
