@@ -190,6 +190,7 @@ MLPTensorParallelFusion::MLPTensorParallelFusion(size_t world_size, size_t world
                     }
                 }
                 auto new_fc = split_fc(fc_node, op::TP_MODE::ALL_REDUCE).first;
+                new_fc->set_friendly_name(fc_node->get_friendly_name());
                 new_fc->get_rt_info().insert({"splitted", true});
                 std::shared_ptr<ov::intel_gpu::op::SyncTensor> sync_node;
                 sync_node =

@@ -170,8 +170,14 @@ memory::ptr memory_pool::get_from_non_padded_pool(const layout& layout,
             ((layout.format != format::b_fs_yx_fsv32 && layout.format != format::b_fs_zyx_fsv32) ||
              (layout.feature() % 32 == 0)) &&
             !has_conflict(it->second._users, restrictions, network_id))) {
+            // temp WA
+            /*if (prim_id == "fullyconnectedcompressed:__module.model.layers.0.self_attn.o_proj/ov_ext::linear/MatMul") {
+                //it->second._users.insert(memory_user(MEM_USER(1, network_id, "test", layout_bytes_count)));
+                break;
+            }*/
             it->second._users.insert(memory_user(MEM_USER(unique_id, network_id, prim_id, layout_bytes_count)));
             auto ret_mem = _engine->reinterpret_buffer(*it->second._memory, layout);
+                //std::cout << "get from pool, mem is "<< &(*it->second._memory) << "reinterpret mem is " << ret_mem << std::endl;
             GPU_DEBUG_CODE(ret_mem->from_memory_pool = true);
             return ret_mem;
         } else {

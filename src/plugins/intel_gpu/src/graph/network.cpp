@@ -232,9 +232,8 @@ network::network(program::ptr program, stream::ptr stream, uint16_t stream_id, o
     : network(program, stream, false, stream_id == 0, sub_memory_manager) {}
 
 network::~network() {
-    // to be fixed
-    /*
-    GPU_DEBUG_IF(debug_configuration::get_instance()->host_time_profiling) {
+    auto log_level = GPU_DEBUG_VALUE_OR(get_config().get_host_time_profiling(), 0);
+    GPU_DEBUG_IF(log_level) {
         for (auto& iter : tp_host_times) {
             if (tp_host_times[iter.first].size() >= 2) {
                 double first = static_cast<double>(tp_host_times[iter.first][0]);
@@ -257,11 +256,6 @@ network::~network() {
             }
         }
     }
-    #ifdef GPU_DEBUG_CONFIG
-        GPU_DEBUG_COUT << "all reduce operations per infer: " << all_reduce_num_per_iter << std::endl;
-        GPU_DEBUG_COUT << "all gather operations per infer: " << all_gather_num_per_iter << std::endl;
-    #endif
-    */
     if (_program != nullptr)
         _program->cancel_compilation_context();
 
@@ -854,6 +848,7 @@ void network::execute_impl(const std::vector<event::ptr>& events) {
     size_t executed_prims = 0;
     std::map<std::string, std::vector<int64_t>> tp_host_times_each_iter;
     for (auto& inst : _exec_order) {
+        auto start = std::chrono::high_resolution_clock::now();
         NODE_DEBUG(*inst);
 
         inst->reset_events();
@@ -868,6 +863,34 @@ void network::execute_impl(const std::vector<event::ptr>& events) {
         executed_prims++;
         if (needs_flushing && executed_prims % flush_frequency == 0)
             get_stream().flush();
+        if (net_id == 1) {
+            auto log_level = GPU_DEBUG_VALUE_OR(get_config().get_host_time_profiling(), 0);
+            GPU_DEBUG_IF(log_level) {
+                auto end = std::chrono::high_resolution_clock::now();
+                if (inst->get_node().is_type<sync_tensor>()) {
+                    if (inst->get_impl_params()->all_reduce) {
+                        tp_host_times_each_iter["sync_tensor_all_reduce"].push_back(std::chrono::duration_cast<std::chrono::microseconds>(end - start).count());
+                        tp_host_times_each_iter["sync_tensor_all_reduce_wait"].push_back(inst->sync_wait_times);
+                        tp_host_times_each_iter["sync_tensor_all_reduce_submem_sync"].push_back(inst->sub_mem_manager_sync_times);
+                        tp_host_times_each_iter["sync_tensor_all_reduce_local_mem_alloc"].push_back(inst->all_reduce_local_mem_alloc_times);
+                        tp_host_times_each_iter["sync_tensor_all_reduce_remote_mem_map"].push_back(inst->all_reduce_remote_mem_mapping_times);
+                        tp_host_times_each_iter["sync_tensor_all_reduce_broadcast_times"].push_back(inst->all_reduce_broadcast_times);
+                        tp_host_times_each_iter["sync_tensor_all_reduce_gather_times"].push_back(inst->all_reduce_gather_times);
+                    } else {
+                        tp_host_times_each_iter["sync_tensor_all_gather"].push_back(std::chrono::duration_cast<std::chrono::microseconds>(end - start).count());
+                        tp_host_times_each_iter["sync_tensor_all_gather_wait"].push_back(inst->sync_wait_times);
+                        tp_host_times_each_iter["sync_tensor_all_gather_submem_sync"].push_back(inst->sub_mem_manager_sync_times);
+                        tp_host_times_each_iter["sync_tensor_all_gather_local_mem_alloc"].push_back(inst->all_reduce_local_mem_alloc_times);
+                        tp_host_times_each_iter["sync_tensor_all_gather_remote_mem_map"].push_back(inst->all_reduce_remote_mem_mapping_times);
+                        tp_host_times_each_iter["sync_tensor_all_gather_broadcast_times"].push_back(inst->all_reduce_broadcast_times);
+                        tp_host_times_each_iter["sync_tensor_all_gather_gather_times"].push_back(inst->all_reduce_gather_times);
+                    }
+                } else {
+                    tp_host_times_each_iter[inst->get_node().get_primitive()->get_type_info()].push_back(
+                        std::chrono::duration_cast<std::chrono::microseconds>(end - start).count());
+                }
+            }
+        }
     }
 
     // Using output of previous network as input to another one may cause hazard (in OOOQ mode) if user would not
@@ -878,6 +901,14 @@ void network::execute_impl(const std::vector<event::ptr>& events) {
     // Reset all flags for the next execution
     for (auto& inst : _exec_order) {
         inst->reset_flags();
+    }
+    auto log_level = GPU_DEBUG_VALUE_OR(get_config().get_host_time_profiling(), 0);
+    GPU_DEBUG_IF(log_level) {
+        for (auto& iter : tp_host_times_each_iter) {
+            const auto begin = std::begin(tp_host_times_each_iter[iter.first]);
+            const auto end = std::end(tp_host_times_each_iter[iter.first]);
+            tp_host_times[iter.first].push_back(std::accumulate(begin, end, (size_t)0, std::plus<size_t>()));
+        }
     }
 }
 

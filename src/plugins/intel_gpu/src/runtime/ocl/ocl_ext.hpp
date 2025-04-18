@@ -10,6 +10,7 @@
 
 #define CL_MEM_ALLOW_UNRESTRICTED_SIZE_INTEL (1 << 23)
 #define CL_MEM_FLAGS_INTEL 0x10001
+#define CL_MEM_DEVICE_ID_INTEL 0x10011
 
 #include <array>
 
@@ -783,6 +784,13 @@ public:
     void* allocate_device(const cl_mem_properties_intel *properties, size_t size, cl_uint alignment, cl_int* err_code_ret) const {
         if (!_device_mem_alloc_fn)
             throw std::runtime_error("[CLDNN] clDeviceMemAllocINTEL is nullptr");
+        cl_mem_properties_intel new_properties[] {
+            CL_MEM_FLAGS_INTEL,
+            CL_MEM_READ_WRITE | CL_MEM_ALLOW_UNRESTRICTED_SIZE_INTEL,
+            CL_MEM_DEVICE_ID_INTEL,
+            (cl_mem_properties_intel)_device.get(),
+            0,
+        };
         return _device_mem_alloc_fn(_ctx.get(), _device.get(), properties, size, alignment, err_code_ret);
     }
 
