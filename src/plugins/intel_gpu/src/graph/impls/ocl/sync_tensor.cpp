@@ -31,7 +31,7 @@ public:
         }
     }
     using Clock = std::chrono::high_resolution_clock;
-    using Duration = std::chrono::duration<double, std::milli>;
+    using Duration = std::chrono::duration<double, std::micro>;
 
     void measure_start(std::string msg) {
         if (this->mark_timers) {
@@ -221,8 +221,8 @@ public:
         //  Create extMemBuffer of type cl_mem from fd.
         cl_mem_properties extMemProperties[] = {(cl_mem_properties)CL_EXTERNAL_MEMORY_HANDLE_DMA_BUF_KHR,
                                                 (cl_mem_properties)fd,
-                                                CL_MEM_DEVICE_ID_INTEL,
-                                                (cl_mem_properties_intel)device_handle,
+                                                //CL_MEM_DEVICE_ID_INTEL,
+                                                //(cl_mem_properties_intel)device_handle,
                                                 0};
         cl_mem extMemBuffer = clCreateBufferWithProperties(context, extMemProperties, 0, size, NULL, &err);
         // std::cout << "finished to create buffer with handle " << fd << "mem is " << extMemBuffer << std::endl;
@@ -406,7 +406,7 @@ public:
 
         err = clSetKernelArg(kernel, 1, sizeof(cl_mem), &dst);
 
-        err = clSetKernelArg(kernel, 2, sizeof(int), &offset);
+        err = clSetKernelArg(kernel, 2, sizeof(size_t), &offset);
 
         size_t global_size[] = {element_count};
         auto queue = ocl_stream.get_cl_queue().get();
@@ -485,7 +485,7 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
                                 size_t w_size,
                                 size_t w_rank) {
         auto& engine = instance.get_network().get_engine();
-        auto& ocl_engine = downcast<ocl::ocl_engine>(engine);
+        //auto& ocl_engine = downcast<ocl::ocl_engine>(engine);
         size_t required_size = layout.bytes_count();
         bool allocated = false;
 
@@ -522,16 +522,17 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
             sub_layout.set_partial_shape(sub_shape);
 
             // Create extMemBuffer of type cl_mem from fd.
-            cl_mem_properties extMemProperties[] = {
+            /*cl_mem_properties extMemProperties[] = {
                 CL_MEM_FLAGS,
                 CL_MEM_READ_WRITE | CL_MEM_ALLOW_UNRESTRICTED_SIZE_INTEL,
-                CL_MEM_DEVICE_ID_INTEL,
-                (cl_mem_properties_intel)handle,
+                //CL_MEM_DEVICE_ID_INTEL,
+                //(cl_mem_properties_intel)handle,
                 0,
-            };
-            auto local_mem =
+            };*/
+            bufs[i] = engine.allocate_memory(sub_layout, cldnn::allocation_type::cl_mem, false);
+            /*auto local_mem =
                 clCreateBufferWithProperties(context, extMemProperties, 0, sub_layout.bytes_count(), NULL, NULL);
-            bufs[i] = std::make_shared<ocl::gpu_buffer>(&ocl_engine, sub_layout, cl::Buffer(local_mem, true), nullptr);
+            bufs[i] = std::make_shared<ocl::gpu_buffer>(&ocl_engine, sub_layout, cl::Buffer(local_mem, true), nullptr);*/
             allocated = true;
         }
         return allocated;
@@ -562,6 +563,7 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
         if (!is_all_reduce && all_gather_remote_dst.size() == 0) {
             all_gather_remote_dst.assign(w_size, nullptr);
         }
+        instance.sync_wait_times = timer.get().count();
         // use ring all-reduce solution to implement
         timer.measure_start(std::string("prepare for sync for mem manager"));
         auto sub_mem_mgr = instance.get_network().get_sub_mem_mgr();
@@ -590,6 +592,7 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
             }
         }
         timer.measure_end(std::string("prepare for sync for mem manager"));
+        instance.sub_mem_manager_sync_times = timer.get().count();
         timer.measure_start(std::string("prepare for sync for local memory allocation"));
 
         auto p2p_src_layout = instance.get_output_layout(0);
@@ -626,6 +629,7 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
         sub_mem_mgr->_memorys_table[id][w_rank].add_flag_concat[0] = true;
         sub_mem_mgr->_memorys_table[id][w_rank].flag = true;
         timer.measure_end(std::string("prepare for sync for local memory allocation"));
+        instance.all_reduce_local_mem_alloc_times = timer.get().count();
         timer.measure_start(std::string("prepare for remote memory mapping"));
         std::vector<cldnn::event::ptr> sync_events;
         if (is_all_reduce) {
@@ -686,6 +690,7 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
                 }
             }
             timer.measure_end(std::string("prepare for remote memory maping"));
+            instance.all_reduce_remote_mem_mapping_times = timer.get().count();
             timer.measure_start(std::string("scatter stage for Ring all-reduce"));
             // scatter stage for Ring all-reduce
             for (int32_t step = 0; step < static_cast<int>(w_size) - 1; step++) {
@@ -773,6 +778,7 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
                 }
             }
             timer.measure_end(std::string("scatter stage for Ring all-reduce"));
+            instance.all_reduce_broadcast_times = timer.get().count();
             timer.measure_start(std::string("gather stage for Ring all-reduce"));
             for (int32_t step = 0; step < static_cast<int>(w_size) - 1; step++) {
                 int32_t send_chunk_idx = (w_rank - step + 1) % w_size;
@@ -872,6 +878,7 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
                 }
             }
             timer.measure_end(std::string("gather stage for Ring all-reduce"));
+            instance.all_reduce_gather_times = timer.get().count();
         } else {
             while (true) {
                 size_t wait_all_ouput_ready = 0;

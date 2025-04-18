@@ -348,6 +348,11 @@ public:
     kernel_impl_params get_fake_aligned_params_if_possible(kernel_impl_params const& orig_impl_param);
     bool all_dependencies_cpu_impl() const;
     int64_t sync_wait_times = 0;
+    int64_t sub_mem_manager_sync_times = 0;
+    int64_t all_reduce_local_mem_alloc_times = 0;
+    int64_t all_reduce_remote_mem_mapping_times = 0;
+    int64_t all_reduce_broadcast_times = 0;
+    int64_t all_reduce_gather_times = 0;
 
 protected:
     primitive_inst(network& network, program_node const& node, bool allocate_memory);

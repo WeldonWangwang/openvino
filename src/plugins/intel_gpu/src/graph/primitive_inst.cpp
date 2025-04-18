@@ -270,8 +270,7 @@ event::ptr primitive_inst::set_output_memory(memory::ptr mem_new, bool check, si
     if (is_constant()) {
         ev = mem_new->copy_from(_network.get_stream(), *_outputs[idx], false);
     } else {
-        _outputs[idx] = mem_new;
-        _max_output_layout_count[idx] = mem_new->get_layout().get_linear_size();
+        //_outputs[idx] = mem_new;
         ev = get_network().get_stream().create_user_event(true);
         if (get_node().is_type<sync_tensor>() && get_node().get_preferred_impl_type() == impl_types::ocl) {
             auto w_rank = get_network().get_program()->get_config().subStreamExecConfig.get_rank()[0];
@@ -283,15 +282,18 @@ event::ptr primitive_inst::set_output_memory(memory::ptr mem_new, bool check, si
                           << _outputs[0]->get_layout().get_shape().to_string()
                           << ", new = " << mem_new->get_layout().get_shape().to_string() << std::endl;
                 _outputs[1] = mem_new;
+                _max_output_layout_count[1] = mem_new->get_layout().get_linear_size();
             } else {
                 // All reduce
                 std::cout << "set_output_memory(sync_tensor reduce): old = "
                           << _outputs[w_rank]->get_layout().get_shape().to_string()
                           << ", new = " << mem_new->get_layout().get_shape().to_string() << std::endl;
                 _outputs[0] = mem_new;
+                _max_output_layout_count[0] = mem_new->get_layout().get_linear_size();
             }
         } else {
             _outputs[idx] = mem_new;
+            _max_output_layout_count[idx] = mem_new->get_layout().get_linear_size();
         }
     }
     return ev;
@@ -607,7 +609,10 @@ void primitive_inst::clear_output_memory() {
 void primitive_inst::realloc_if_needed(bool prev_execution_skipped) {
     OV_ITT_SCOPED_TASK(ov::intel_gpu::itt::domains::intel_gpu_plugin, openvino::itt::handle("realloc_if_needed: " + id()));
     GPU_DEBUG_PROFILED_STAGE(instrumentation::pipeline_stage::memory_allocation);
-
+    // sync tensor is supposed to always do in-place operation on input mem
+    // further check gather mode
+    if (get_node().is_type<sync_tensor>())
+        return;
     const auto& users = get_user_insts();
     if (users.size() == 1 && users.front()->get_node().is_type<concatenation>() && users.front()->get_node().is_runtime_skippable()) {
         auto concat_inst = users.front();
@@ -952,7 +957,13 @@ void primitive_inst::realloc_if_needed(bool prev_execution_skipped) {
         }
         if (prealloc_info.first && sp.can_preallocate(ov::shape_size(prealloc_info.second) * (dt_sizes_in_B[i]))) {
             updated_params.output_layouts[i] = updated_layouts[i].clone_with_other_shape(prealloc_info.second);
+            GPU_DEBUG_TRACE_DETAIL << id() << ": prealloc info [" << i << "] - "
+            << prealloc_info.second
+            << std::endl;
         }
+        GPU_DEBUG_TRACE_DETAIL << id() << ": updated layout linear size " << i << "] - "
+            << updated_layouts[i].get_linear_size() << "updated params linear size " << updated_params.output_layouts[i].get_linear_size()
+            << std::endl;
         if (updated_params.output_layouts[i].get_linear_size() < updated_layouts[i].get_linear_size()) {
             updated_params.output_layouts[i] = updated_layouts[i];
         }
@@ -1989,7 +2000,6 @@ void primitive_inst::prepare_primitive() {
         set_arguments();
     }
     on_execute();
-
     if (!_node->is_type<condition>() && !_node->is_type<loop>()) {
         for (size_t i = 0; i < _outputs.size(); ++i) {
             if ((!orig_outputs[i] && _outputs[i]) || (orig_outputs[i] && !_outputs[i])) {
