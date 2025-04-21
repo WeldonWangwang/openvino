@@ -570,6 +570,10 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
         while (true) {
             std::lock_guard<std::mutex> lock(sub_mem_mgr->_flagMutex);
             sub_mem_mgr->updated_flag = false;
+            sub_mem_mgr->step1_copy_done.store(0);
+            sub_mem_mgr->step2_add_done.store(0);
+            sub_mem_mgr->step3_concat_copy_done.store(0);
+            sub_mem_mgr->step4_concat_copy_done.store(0);
             if (sub_mem_mgr->_use_count[id] == w_size) {
                 sub_mem_mgr->_use_count[id] = 0;
                 for (size_t i = 0; i < w_size; i++) {
@@ -657,7 +661,7 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
             auto dst_height = src_height;
             // Prepare CL memory mapping for P2P copying next
             {
-                auto dst_idx = (w_rank + 1) % w_size;
+                // auto dst_idx = (w_rank + 1) % w_size;
                 cl_mem dst_cl_buf = nullptr;
                 cldnn::memory::ptr dst_mem = sub_mem_mgr->_memorys_table[id][dst_idx].recv_bufs[1];
                 size_t data_size = dst_mem->size();
@@ -695,7 +699,7 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
 
                 int32_t send_chunk_idx = (w_rank - step + w_size) % w_size;
                 int32_t target_chunk_idx = (w_rank - step - 1 + w_size) % w_size;
-                auto next_rank_idx = (w_rank + 1) % w_size;
+                // auto next_rank_idx = (w_rank + 1) % w_size;
 
                 auto dst_cl_buf = static_cast<cl_mem>(sub_mem_mgr->_memorys_table[id][w_rank]
                                                           .remote_mems[0]);  // mapped from remote memory of target rank
@@ -729,14 +733,9 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
                 }
                 ret = clWaitForEvents(1, &event);
                 clReleaseEvent(event);
-                sub_mem_mgr->_memorys_table[id][next_rank_idx].recv_flag[step + 1] = true;
+                sub_mem_mgr->step1_copy_done.fetch_add(1);
                 while (true) {
-                    size_t wait_all_ouput_ready = 0;
-                    for (int idx = 0; idx < static_cast<int>(w_size); idx++) {
-                        if (sub_mem_mgr->_memorys_table[id][idx].recv_flag[step + 1] == true)
-                            wait_all_ouput_ready++;
-                    }
-                    if (wait_all_ouput_ready == w_size)
+                    if (sub_mem_mgr->step1_copy_done.load() == 2)
                         break;
                 }
 
@@ -761,14 +760,9 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
                     adder_instance.element_type_to_kernel_data_type(dst_mem_add->get_layout().data_type),
                     off_set_add / output_element_size);
                 sync_add_event->wait();
-                sub_mem_mgr->_memorys_table[id][w_rank].add_flag[step + 1] = true;
+                sub_mem_mgr->step2_add_done.fetch_add(1);
                 while (true) {
-                    size_t wait_all_ouput_ready = 0;
-                    for (int idx = 0; idx < static_cast<int>(w_size); idx++) {
-                        if (sub_mem_mgr->_memorys_table[id][idx].add_flag[step + 1] == true)
-                            wait_all_ouput_ready++;
-                    }
-                    if (wait_all_ouput_ready == w_size)
+                    if (sub_mem_mgr->step2_add_done.load() == 2)
                         break;
                 }
             }
@@ -810,15 +804,9 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
                     }
                     ret = clWaitForEvents(1, &event);
                     clReleaseEvent(event);
-                    sub_mem_mgr->_memorys_table[id][dst_idx].recv_flag_concat[step + 1] = true;
+                    sub_mem_mgr->step3_concat_copy_done.fetch_add(1);
                     while (true) {
-                        size_t wait_all_ouput_ready = 0;
-                        for (int idx = 0; idx < static_cast<int>(w_size); idx++) {
-                            if (sub_mem_mgr->_memorys_table[id][idx].recv_flag_concat[step + 1] == true) {
-                                wait_all_ouput_ready++;
-                            }
-                        }
-                        if (wait_all_ouput_ready == w_size)
+                        if (sub_mem_mgr->step3_concat_copy_done.load() == 2)
                             break;
                     }
                 }
@@ -858,17 +846,12 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
                     ret = clWaitForEvents(1, &event);
                     clReleaseEvent(event);
 
-                    sub_mem_mgr->_memorys_table[id][w_rank].add_flag_concat[step + 1] = true;
+                    sub_mem_mgr->step4_concat_copy_done.fetch_add(1);
                     while (true) {
-                        size_t wait_all_ouput_ready = 0;
-                        for (int idx = 0; idx < static_cast<int>(w_size); idx++) {
-                            if (sub_mem_mgr->_memorys_table[id][idx].add_flag_concat[step + 1] == true) {
-                                wait_all_ouput_ready++;
-                            }
-                        }
-                        if (wait_all_ouput_ready == w_size)
+                        if (sub_mem_mgr->step4_concat_copy_done.load() == 2)
                             break;
                     }
+                    sub_mem_mgr->_memorys_table[id][w_rank].add_flag_concat[step + 1] = true;
                 }
             }
             timer.measure_end(std::string("gather stage for Ring all-reduce"));

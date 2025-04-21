@@ -57,6 +57,10 @@ public:
         _use_count.assign(2, 0);
         result = nullptr;
         updated_flag = false;
+        step1_copy_done.store(0);
+        step2_add_done.store(0);
+        step3_concat_copy_done.store(0);
+        step4_concat_copy_done.store(0);
     }
 
     int get_memory_id(int sub_stream_id) {
@@ -79,6 +83,10 @@ public:
     void* result;
     bool updated_flag;
     std::mutex _flagMutex;
+    std::atomic<int> step1_copy_done;
+    std::atomic<int> step2_add_done;
+    std::atomic<int> step3_concat_copy_done;
+    std::atomic<int> step4_concat_copy_done;
 };
 }  // namespace intel_gpu
 }  // namespace ov
