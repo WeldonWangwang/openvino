@@ -227,6 +227,7 @@ public:
         cl_mem extMemBuffer = clCreateBufferWithProperties(context, extMemProperties, 0, size, NULL, &err);
         // std::cout << "finished to create buffer with handle " << fd << "mem is " << extMemBuffer << std::endl;
         if (err < 0) {
+            std::cout << "mem mapping failed!!!" << std::endl;
             OPENVINO_ASSERT(false,
                             "clCreateBufferWithProperties failed, clbuf = %p, fd = %ld, size = %ld, new_cl_mem = %p\n",
                             clbuf,
@@ -417,6 +418,48 @@ public:
         return ocl_stream.create_event(cl::Event(ret));
     }
 
+    void tensor_add_sub_1(cldnn::stream& stream,
+                          cl_mem src,
+                          cl_mem dst,
+                          size_t element_count,
+                          kernel_data_type data_type,
+                          size_t offset,
+                          cl_uint num_events_in_wait_list,
+                          const cl_event* event_wait_list,
+                          cl_event* event) {
+        cl_int err;
+        auto& ocl_stream = downcast<ocl::ocl_stream>(stream);
+        if (src == nullptr || dst == nullptr) {
+            GPU_DEBUG_TRACE_DETAIL << "tensor_add: invalid arguments!";
+        }
+        OPENVINO_ASSERT(src != nullptr && dst != nullptr, "tensor_add: invalid arguments!");
+
+        cl_kernel kernel = get_or_create_kernel_if_possible_sub(stream, data_type, static_cast<int>(offset));
+
+        err = clSetKernelArg(kernel, 0, sizeof(cl_mem), &src);
+
+        err = clSetKernelArg(kernel, 1, sizeof(cl_mem), &dst);
+
+        err = clSetKernelArg(kernel, 2, sizeof(size_t), &offset);
+
+        size_t global_size[] = {element_count};
+        auto queue = ocl_stream.get_cl_queue().get();
+
+        err = clEnqueueNDRangeKernel(queue,
+                                     kernel,
+                                     1,
+                                     nullptr,
+                                     global_size,
+                                     nullptr,
+                                     num_events_in_wait_list,
+                                     event_wait_list,
+                                     event);
+
+        if (err != CL_SUCCESS) {
+            OPENVINO_THROW("enqueue add event failed!");
+        }
+    }
+
     void finish(cldnn::stream& stream) {
         auto& ocl_stream = downcast<ocl::ocl_stream>(stream);
         auto queue = ocl_stream.get_cl_queue().get();
@@ -510,7 +553,6 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
             if (!need_realloc(i)) {
                 continue;
             }
-            // size_t origin_size = bufs[i] != nullptr ? bufs[i]->size() : 0;
             bufs[i] = nullptr;
             auto width = layout.get_shape()[-1];
             auto sub_width = width / w_size;
@@ -583,9 +625,6 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
                     for (size_t j = 0; j < w_size; j++) {
                         sub_mem_mgr->_memorys_table[id][i].events[j] = nullptr;
                         sub_mem_mgr->_memorys_table[id][i].recv_flag[j] = false;
-                        sub_mem_mgr->_memorys_table[id][i].recv_flag_concat[j] = false;
-                        sub_mem_mgr->_memorys_table[id][i].add_flag_concat[j] = false;
-                        sub_mem_mgr->_memorys_table[id][i].add_flag[j] = false;
                     }
                 }
             }
@@ -626,8 +665,6 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
         }
 
         sub_mem_mgr->_memorys_table[id][w_rank].recv_flag[0] = true;
-        sub_mem_mgr->_memorys_table[id][w_rank].recv_flag_concat[0] = true;
-        sub_mem_mgr->_memorys_table[id][w_rank].add_flag_concat[0] = true;
         sub_mem_mgr->_memorys_table[id][w_rank].flag = true;
         timer.measure_end(std::string("prepare for sync for local memory allocation"));
         timer.measure_start(std::string("prepare for remote memory mapping"));
@@ -661,7 +698,6 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
             auto dst_height = src_height;
             // Prepare CL memory mapping for P2P copying next
             {
-                // auto dst_idx = (w_rank + 1) % w_size;
                 cl_mem dst_cl_buf = nullptr;
                 cldnn::memory::ptr dst_mem = sub_mem_mgr->_memorys_table[id][dst_idx].recv_bufs[1];
                 size_t data_size = dst_mem->size();
@@ -692,14 +728,20 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
             timer.measure_end(std::string("prepare for remote memory maping"));
             timer.measure_start(std::string("scatter stage for Ring all-reduce"));
             // scatter stage for Ring all-reduce
+            cl_int ret;
             for (int32_t step = 0; step < static_cast<int>(w_size) - 1; step++) {
+                // TODO: need check why enqueue hang, when the dependent event in status CL_SUBMITTED
+                sub_mem_mgr->user_events[w_rank] = clCreateUserEvent(local_context, &ret);
+                if (ret != CL_SUCCESS) {
+                    OPENVINO_THROW("create null event failed!");
+                }
+
                 auto src_mem = std::dynamic_pointer_cast<const ocl::gpu_buffer>(
                     sub_mem_mgr->_memorys_table[id][w_rank].recv_bufs[0]);
                 auto src_buf = src_mem->get_buffer().get();
 
                 int32_t send_chunk_idx = (w_rank - step + w_size) % w_size;
                 int32_t target_chunk_idx = (w_rank - step - 1 + w_size) % w_size;
-                // auto next_rank_idx = (w_rank + 1) % w_size;
 
                 auto dst_cl_buf = static_cast<cl_mem>(sub_mem_mgr->_memorys_table[id][w_rank]
                                                           .remote_mems[0]);  // mapped from remote memory of target rank
@@ -709,30 +751,28 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
                     src_off_set = src_off_set + chunk_size[j];
                 }
                 // view the tensor as 1D
-                size_t src_region[3] = {src_off_set, 0, 0}; // start address of src orgin
-                size_t dst_region[3] = {0, 0, 0}; // dst with no padding
-                cl_event event;
+                size_t src_region[3] = {src_off_set, 0, 0};  // start address of src orgin
+                size_t dst_region[3] = {0, 0, 0};            // dst with no padding
                 size_t rect[3] = {chunk_size[send_chunk_idx] / dst_height, dst_height, 1};
 
-                auto ret = clEnqueueCopyBufferRect(local_queue,
-                                                   src_buf,
-                                                   dst_cl_buf,
-                                                   src_region,
-                                                   dst_region,
-                                                   rect,
-                                                   0,
-                                                   0,
-                                                   0,
-                                                   0,
-                                                   0,
-                                                   nullptr,
-                                                   &event);
+                ret = clEnqueueCopyBufferRect(local_queue,
+                                              src_buf,
+                                              dst_cl_buf,
+                                              src_region,
+                                              dst_region,
+                                              rect,
+                                              0,
+                                              0,
+                                              0,
+                                              0,
+                                              1,
+                                              &sub_mem_mgr->user_events[w_rank],
+                                              &sub_mem_mgr->step1_copy_events[w_rank]);
                 if (ret != CL_SUCCESS) {
                     GPU_DEBUG_TRACE_DETAIL << "scatter stage clEnqueueCopyBufferRect failed: " << ", step = " << step;
                     OPENVINO_THROW("scatter stage in syn tensor failed");
                 }
-                ret = clWaitForEvents(1, &event);
-                clReleaseEvent(event);
+
                 sub_mem_mgr->step1_copy_done.fetch_add(1);
                 while (true) {
                     if (sub_mem_mgr->step1_copy_done.load() == 2)
@@ -751,15 +791,17 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
                 for (int32_t j = 0; j < target_chunk_idx; j++)
                     off_set_add = off_set_add + chunk_size[j];
 
-                cldnn::event::ptr sync_add_event;
-                sync_add_event = adder_instance.tensor_add_sub(
+                adder_instance.tensor_add_sub_1(
                     local_stream,
                     src_cl_buf_add,
                     dst_cl_buf_add,
                     chunk_size[target_chunk_idx] / output_element_size,
                     adder_instance.element_type_to_kernel_data_type(dst_mem_add->get_layout().data_type),
-                    off_set_add / output_element_size);
-                sync_add_event->wait();
+                    off_set_add / output_element_size,
+                    1,
+                    &sub_mem_mgr->step1_copy_events[dst_idx],
+                    &sub_mem_mgr->step2_add_events[w_rank]);
+
                 sub_mem_mgr->step2_add_done.fetch_add(1);
                 while (true) {
                     if (sub_mem_mgr->step2_add_done.load() == 2)
@@ -783,27 +825,26 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
                     }
                     size_t src_rec[3] = {off_set, 0, 0};
                     size_t dst_rec[3] = {0, 0, 0};
-                    cl_event event;
                     size_t rect[3] = {chunk_size[send_chunk_idx] / dst_height, dst_height, 1};
-                    auto ret = clEnqueueCopyBufferRect(local_queue,
-                                                       src_buf,
-                                                       dst_cl_buf,
-                                                       src_rec,
-                                                       dst_rec,
-                                                       rect,
-                                                       0,
-                                                       0,
-                                                       0,
-                                                       0,
-                                                       0,
-                                                       nullptr,
-                                                       &event);
+                    ret = clEnqueueCopyBufferRect(local_queue,
+                                                  src_buf,
+                                                  dst_cl_buf,
+                                                  src_rec,
+                                                  dst_rec,
+                                                  rect,
+                                                  0,
+                                                  0,
+                                                  0,
+                                                  0,
+                                                  2,
+                                                  sub_mem_mgr->step2_add_events,
+                                                  &sub_mem_mgr->step3_gather_copy_events[w_rank]);
                     if (ret != CL_SUCCESS) {
-                        GPU_DEBUG_TRACE_DETAIL << "broadcast of gather stage clEnqueueCopyBufferRect failed: " << ", step = " << step;
+                        GPU_DEBUG_TRACE_DETAIL
+                            << "broadcast of gather stage clEnqueueCopyBufferRect failed: " << ", step = " << step;
                         OPENVINO_THROW("broadcast stage in sync tensor failed: ");
                     }
-                    ret = clWaitForEvents(1, &event);
-                    clReleaseEvent(event);
+
                     sub_mem_mgr->step3_concat_copy_done.fetch_add(1);
                     while (true) {
                         if (sub_mem_mgr->step3_concat_copy_done.load() == 2)
@@ -824,7 +865,6 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
                     }
                     size_t dst_rec[3] = {off_set, 0, 0};
                     size_t src_rec[3] = {0, 0, 0};
-                    cl_event event;
                     size_t rect[3] = {chunk_size[recv_chunk_idx] / dst_height, dst_height, 1};
                     auto ret = clEnqueueCopyBufferRect(local_queue,
                                                        src_cl_buf_add,
@@ -836,24 +876,41 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
                                                        0,
                                                        0,
                                                        0,
-                                                       0,
-                                                       nullptr,
-                                                       &event);
+                                                       1,
+                                                       &sub_mem_mgr->step3_gather_copy_events[dst_idx],
+                                                       &sub_mem_mgr->step4_gather_copy_events[w_rank]);
                     if (ret != CL_SUCCESS) {
-                        GPU_DEBUG_TRACE_DETAIL << "gather stage clEnqueueCopyBufferRect failed: " << ", step = " << step;
+                        std::cout << "gather stage clEnqueueCopyBufferRect failed: " << ", step = " << step;
                         OPENVINO_THROW("gather stage of sync tensor failed: ");
                     }
-                    ret = clWaitForEvents(1, &event);
-                    clReleaseEvent(event);
+
+                    ret = clSetUserEventStatus(sub_mem_mgr->user_events[w_rank], CL_COMPLETE);
+                    if (ret != CL_SUCCESS) {
+                        OPENVINO_THROW("sync tensor trigger all-reduce execute failed!");
+                    }
+                    clFinish(local_queue);
 
                     sub_mem_mgr->step4_concat_copy_done.fetch_add(1);
                     while (true) {
                         if (sub_mem_mgr->step4_concat_copy_done.load() == 2)
                             break;
                     }
-                    sub_mem_mgr->_memorys_table[id][w_rank].add_flag_concat[step + 1] = true;
                 }
             }
+            clReleaseEvent(sub_mem_mgr->step4_gather_copy_events[w_rank]);
+            sub_mem_mgr->step4_gather_copy_events[w_rank] = NULL;
+
+            clReleaseEvent(sub_mem_mgr->step3_gather_copy_events[w_rank]);
+            sub_mem_mgr->step3_gather_copy_events[w_rank] = NULL;
+
+            clReleaseEvent(sub_mem_mgr->step2_add_events[w_rank]);
+            sub_mem_mgr->step2_add_events[w_rank] = NULL;
+
+            clReleaseEvent(sub_mem_mgr->step1_copy_events[w_rank]);
+            sub_mem_mgr->step1_copy_events[w_rank] = NULL;
+
+            clReleaseEvent(sub_mem_mgr->user_events[w_rank]);
+            sub_mem_mgr->user_events[w_rank] = NULL;
             timer.measure_end(std::string("gather stage for Ring all-reduce"));
         } else {
             while (true) {
