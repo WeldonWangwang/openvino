@@ -772,6 +772,8 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
                     GPU_DEBUG_TRACE_DETAIL << "scatter stage clEnqueueCopyBufferRect failed: " << ", step = " << step;
                     OPENVINO_THROW("scatter stage in syn tensor failed");
                 }
+                sub_mem_mgr->step1_copy_events_ptr[w_rank] =
+                ocl_stream.create_event(cl::Event(sub_mem_mgr->step1_copy_events[w_rank]));
 
                 sub_mem_mgr->step1_copy_done.fetch_add(1);
                 while (true) {
@@ -790,7 +792,6 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
                 size_t off_set_add = 0;
                 for (int32_t j = 0; j < target_chunk_idx; j++)
                     off_set_add = off_set_add + chunk_size[j];
-
                 adder_instance.tensor_add_sub_1(
                     local_stream,
                     src_cl_buf_add,
@@ -802,6 +803,8 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
                     &sub_mem_mgr->step1_copy_events[dst_idx],
                     &sub_mem_mgr->step2_add_events[w_rank]);
 
+                sub_mem_mgr->step2_add_events_ptr[w_rank] =
+                    ocl_stream.create_event(cl::Event(sub_mem_mgr->step2_add_events[w_rank]));
                 sub_mem_mgr->step2_add_done.fetch_add(1);
                 while (true) {
                     if (sub_mem_mgr->step2_add_done.load() == 2)
@@ -844,6 +847,8 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
                             << "broadcast of gather stage clEnqueueCopyBufferRect failed: " << ", step = " << step;
                         OPENVINO_THROW("broadcast stage in sync tensor failed: ");
                     }
+                    sub_mem_mgr->step3_gather_copy_events_ptr[w_rank] =
+                    ocl_stream.create_event(cl::Event(sub_mem_mgr->step3_gather_copy_events[w_rank]));
 
                     sub_mem_mgr->step3_concat_copy_done.fetch_add(1);
                     while (true) {
@@ -883,34 +888,16 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
                         std::cout << "gather stage clEnqueueCopyBufferRect failed: " << ", step = " << step;
                         OPENVINO_THROW("gather stage of sync tensor failed: ");
                     }
+                    sub_mem_mgr->step4_gather_copy_events_ptr[w_rank] =
+                    ocl_stream.create_event(cl::Event(sub_mem_mgr->step4_gather_copy_events[w_rank]));
 
                     ret = clSetUserEventStatus(sub_mem_mgr->user_events[w_rank], CL_COMPLETE);
                     if (ret != CL_SUCCESS) {
                         OPENVINO_THROW("sync tensor trigger all-reduce execute failed!");
                     }
-                    clFinish(local_queue);
-
-                    sub_mem_mgr->step4_concat_copy_done.fetch_add(1);
-                    while (true) {
-                        if (sub_mem_mgr->step4_concat_copy_done.load() == 2)
-                            break;
-                    }
+                    sync_events.push_back(sub_mem_mgr->step4_gather_copy_events_ptr[w_rank]);
                 }
             }
-            clReleaseEvent(sub_mem_mgr->step4_gather_copy_events[w_rank]);
-            sub_mem_mgr->step4_gather_copy_events[w_rank] = NULL;
-
-            clReleaseEvent(sub_mem_mgr->step3_gather_copy_events[w_rank]);
-            sub_mem_mgr->step3_gather_copy_events[w_rank] = NULL;
-
-            clReleaseEvent(sub_mem_mgr->step2_add_events[w_rank]);
-            sub_mem_mgr->step2_add_events[w_rank] = NULL;
-
-            clReleaseEvent(sub_mem_mgr->step1_copy_events[w_rank]);
-            sub_mem_mgr->step1_copy_events[w_rank] = NULL;
-
-            clReleaseEvent(sub_mem_mgr->user_events[w_rank]);
-            sub_mem_mgr->user_events[w_rank] = NULL;
             timer.measure_end(std::string("gather stage for Ring all-reduce"));
         } else {
             while (true) {

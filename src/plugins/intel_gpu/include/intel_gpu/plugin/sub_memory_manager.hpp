@@ -87,6 +87,11 @@ public:
     cl_event step2_add_events[2];
     cl_event step3_gather_copy_events[2];
     cl_event step4_gather_copy_events[2];
+
+    cldnn::event::ptr step1_copy_events_ptr[2];
+    cldnn::event::ptr step2_add_events_ptr[2];
+    cldnn::event::ptr step3_gather_copy_events_ptr[2];
+    cldnn::event::ptr step4_gather_copy_events_ptr[2];
 };
 }  // namespace intel_gpu
 }  // namespace ov
