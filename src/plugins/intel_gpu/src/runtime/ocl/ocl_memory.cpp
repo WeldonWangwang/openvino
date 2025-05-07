@@ -54,19 +54,6 @@ gpu_buffer::gpu_buffer(ocl_engine* engine,
                        const layout& layout)
     : lockable_gpu_mem(), memory(engine, layout, allocation_type::cl_mem, nullptr),
     _buffer(engine->get_cl_context(), CL_MEM_READ_WRITE | CL_MEM_ALLOW_UNRESTRICTED_SIZE_INTEL, size()) {
-    // create with memory properties
-    /*auto handle = engine->get_cl_device().get();
-    cl_mem_properties_intel extMemProperties[] = {
-        CL_MEM_FLAGS_INTEL,
-        CL_MEM_READ_WRITE | CL_MEM_ALLOW_UNRESTRICTED_SIZE_INTEL,
-        CL_MEM_DEVICE_ID_INTEL,
-        (cl_mem_properties_intel)handle,
-        0,
-    };
-    auto clCreateBufferWithPropertiesINTEL = (clCreateBufferWithPropertiesINTEL_fn)
-        clGetExtensionFunctionAddress("clCreateBufferWithPropertiesINTEL");
-    _buffer = clCreateBufferWithPropertiesINTEL(engine->get_cl_context().get(), extMemProperties, 0, size(), NULL, NULL);
-    GPU_DEBUG_TRACE_DETAIL << "cl_mem allocated: " << size() << std::endl;*/
     m_mem_tracker =
         std::make_shared<MemoryTracker>(engine, _buffer.get(), layout.bytes_count(), allocation_type::cl_mem);
 }
