@@ -9,7 +9,7 @@
 #include <condition_variable>
 #include <mutex>
 #include <thread>
-
+#include <unistd.h>
 #include "intel_gpu/runtime/error_handler.hpp"
 #include "register.hpp"
 #include "registry/implementation_map.hpp"
@@ -216,7 +216,7 @@ public:
         uint64_t fd;
         err = clGetMemObjectInfo(clbuf, CL_MEM_ALLOCATION_HANDLE_INTEL, sizeof(fd), &fd, NULL);
         if (err < 0) {
-            std::cout << "FAILED to derive handle from mem obj " << clbuf;
+            GPU_DEBUG_TRACE_DETAIL << "FAILED to derive handle from mem obj " << clbuf << std::endl;;
         }
         // std::cout << "finished to derive handle from " << clbuf << "handle is " << fd << std::endl;
         //  Create extMemBuffer of type cl_mem from fd.
@@ -227,7 +227,7 @@ public:
                                                 0};
         cl_mem extMemBuffer = clCreateBufferWithProperties(context, extMemProperties, 0, size, NULL, &err);
         if (err < 0) {
-            std::cout << "FAILED to import buffer from mem " << clbuf << ", fd as " << fd;
+            GPU_DEBUG_TRACE_DETAIL << "FAILED to import buffer from mem " << clbuf << ", fd as " << fd << std::endl;
             OPENVINO_ASSERT(false,
                             "clCreateBufferWithProperties failed, clbuf = %p, fd = %ld, size = %ld, new_cl_mem = %p\n",
                             clbuf,
