@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 #define CL_VERSION_3_0 1
-#include <CL/cl.h>
-#include <CL/cl_ext.h>
+// #include <CL/cl.h>
+// #include <CL/cl_ext.h>
 
 #include <algorithm>
 #include <condition_variable>
@@ -472,6 +472,164 @@ private:
     std::map<kernel_data_type, cl_kernel> kernels;
 };
 
+class simple_tensor_copy {
+public:
+    simple_tensor_copy() {}
+    ~simple_tensor_copy() {
+        for (auto& item : kernels) {
+            if (item.second)
+                clReleaseKernel(item.second);
+        }
+        kernels.clear();
+        if (program)
+            clReleaseProgram(program);
+    }
+
+    typedef enum _kernel_data_type {
+        e_type_fp16 = 0,
+        e_type_int8 = 1,
+        e_type_fp32 = 2,
+    } kernel_data_type;
+
+    kernel_data_type element_type_to_kernel_data_type(ov::element::Type_t element_type) {
+        switch (element_type) {
+        case ov::element::f16:
+            return kernel_data_type::e_type_fp16;
+        case ov::element::i8:
+            return kernel_data_type::e_type_int8;
+        case ov::element::f32:
+            return kernel_data_type::e_type_fp32;
+        default:
+            OPENVINO_THROW("Error: unsupported element type for kernel adder - ",
+                           ov::element::Type(element_type).to_string().c_str());
+            break;
+        }
+        return kernel_data_type::e_type_int8;
+    }
+
+    cl_kernel create_kernel(cldnn::stream& stream, const char* kernel_code, const char* kernelName) {
+        cl_int err;
+        auto& ocl_stream = downcast<ocl::ocl_stream>(stream);
+        GPU_DEBUG_TRACE_DETAIL << "create_kernel: name = " << kernelName;
+
+        cl_uint knlcount = 1;
+        const char* knlstrList[] = {kernel_code};
+        size_t knlsizeList[] = {strlen(kernel_code)};
+
+        cl_context context = ocl_stream.get_engine().get_cl_context().get();
+        program = clCreateProgramWithSource(context, knlcount, knlstrList, knlsizeList, &err);
+
+        std::string buildopt = "-cl-std=CL2.0 -cl-intel-greater-than-4GB-buffer-required";
+        err = clBuildProgram(program, 0, NULL, buildopt.c_str(), NULL, NULL);
+        if (err < 0) {
+            size_t logsize = 0;
+            auto device = ocl_stream.get_engine().get_cl_device().get();
+            err = clGetProgramBuildInfo(program, device, CL_PROGRAM_BUILD_LOG, 0, NULL, &logsize);
+            // CHECK_OCL_ERROR(err, "clGetProgramBuildInfo failed");
+
+            std::vector<char> logbuf(logsize + 1, 0);
+            err = clGetProgramBuildInfo(program, device, CL_PROGRAM_BUILD_LOG, logsize + 1, logbuf.data(), NULL);
+            GPU_DEBUG_TRACE_DETAIL << "clGetProgramBuildInfo failed: " << logbuf.data();
+            // OPENVINO_ASSERT(err >= 0, "clGetProgramBuildInfo: ", logbuf.data());
+        }
+        cl_kernel kernel = clCreateKernel(program, kernelName, &err);
+        return kernel;
+    }
+
+    cl_kernel get_or_create_kernel_if_possible_sub(cldnn::stream& stream, kernel_data_type type, size_t offset) {
+        std::lock_guard<std::mutex> lock(mutex);
+        auto it = kernels.find(type);
+        if (it != kernels.end()) {
+            return it->second;
+        }
+
+#define COPY_OP_KERNEL_SOURCE_CODE(DATA_TYPE)                                                             \
+    "kernel void tensor_copy_kernel_" #DATA_TYPE " (const global " #DATA_TYPE " *src, global " #DATA_TYPE \
+    " *dst, int src_offset, int dst_offset) {"                                                            \
+    "const int id = get_global_id(0);"                                                                    \
+    "const int src_idx = id + src_offset;"                                                                \
+    "const int dst_idx = id + dst_offset;"                                                                \
+    "dst[dst_idx] = src[src_idx];"                                                                        \
+    "}"
+        if (type == kernel_data_type::e_type_fp16) {
+            const char tensor_copy_kernel_fp16[] = COPY_OP_KERNEL_SOURCE_CODE(half);
+            const char kernel_name[] = "tensor_copy_kernel_half";
+            kernels[type] = create_kernel(stream, tensor_copy_kernel_fp16, kernel_name);
+            return kernels[type];
+        } else if (type == kernel_data_type::e_type_int8) {
+            const char tensor_copy_kernel_int8[] = COPY_OP_KERNEL_SOURCE_CODE(char);
+            const char kernel_name[] = "tensor_copy_kernel_char";
+            kernels[type] = create_kernel(stream, tensor_copy_kernel_int8, kernel_name);
+            return kernels[type];
+        } else if (type == kernel_data_type::e_type_fp32) {
+            const char tensor_copy_kernel_fp32[] = COPY_OP_KERNEL_SOURCE_CODE(float);
+            const char kernel_name[] = "tensor_copy_kernel_float";
+            kernels[type] = create_kernel(stream, tensor_copy_kernel_fp32, kernel_name);
+            return kernels[type];
+        } else {
+            OPENVINO_THROW("error: unsupported adder kernel data type ", static_cast<int>(type));
+        }
+#undef COPY_OP_KERNEL_SOURCE_CODE
+        return kernels[type];
+    }
+
+    void tensor_copy(cldnn::stream& stream,
+                          cl_mem src,
+                          cl_mem dst,
+                          size_t element_count,
+                          kernel_data_type data_type,
+                          size_t src_offset,
+                          size_t dst_offset,
+                          cl_uint num_events_in_wait_list,
+                          const cl_event* event_wait_list,
+                          cl_event* event) {
+        cl_int err;
+        auto& ocl_stream = downcast<ocl::ocl_stream>(stream);
+        if (src == nullptr || dst == nullptr) {
+            GPU_DEBUG_TRACE_DETAIL << "tensor_add: invalid arguments!";
+        }
+        OPENVINO_ASSERT(src != nullptr && dst != nullptr, "tensor_add: invalid arguments!");
+
+        cl_kernel kernel = get_or_create_kernel_if_possible_sub(stream, data_type, static_cast<int>(src_offset));
+
+        err = clSetKernelArg(kernel, 0, sizeof(cl_mem), &src);
+
+        err = clSetKernelArg(kernel, 1, sizeof(cl_mem), &dst);
+
+        err = clSetKernelArg(kernel, 2, sizeof(size_t), &src_offset);
+
+        err = clSetKernelArg(kernel, 3, sizeof(size_t), &dst_offset);
+
+        size_t global_size[] = {element_count};
+        auto queue = ocl_stream.get_cl_queue().get();
+
+        err = clEnqueueNDRangeKernel(queue,
+                                     kernel,
+                                     1,
+                                     nullptr,
+                                     global_size,
+                                     nullptr,
+                                     num_events_in_wait_list,
+                                     event_wait_list,
+                                     event);
+
+        if (err != CL_SUCCESS) {
+            OPENVINO_THROW("enqueue add event failed!");
+        }
+    }
+
+    void finish(cldnn::stream& stream) {
+        auto& ocl_stream = downcast<ocl::ocl_stream>(stream);
+        auto queue = ocl_stream.get_cl_queue().get();
+        clFinish(queue);
+    }
+
+private:
+    cl_program program;
+    std::mutex mutex;
+    std::map<kernel_data_type, cl_kernel> kernels;
+};
+
 static gpu_p2p_helper& get_p2p_instance() {
     static gpu_p2p_helper gpu_p2p_instance;
     return gpu_p2p_instance;
@@ -479,6 +637,11 @@ static gpu_p2p_helper& get_p2p_instance() {
 
 static simple_tensor_add& get_adder_instance(size_t idx) {
     static simple_tensor_add adder_instance[4];
+    return adder_instance[idx];
+}
+
+static simple_tensor_copy& get_copy_instance(size_t idx) {
+    static simple_tensor_copy adder_instance[4];
     return adder_instance[idx];
 }
 
@@ -497,7 +660,7 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
     ~sync_tensor_impl() {
         for (auto& mem : all_gather_remote_dst) {
             if (mem) {
-                release_remote_mems(static_cast<cl_mem>(mem));
+                // release_remote_mems(static_cast<cl_mem>(mem));
             }
         }
         all_gather_remote_dst.clear();
@@ -716,7 +879,7 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
 
                 if (need_update_remote_mems || dst_cl_buf == nullptr) {
                     if (dst_cl_buf) {
-                        release_remote_mems(dst_cl_buf);
+                        // release_remote_mems(dst_cl_buf);
                     }
                     dst_cl_buf = gpu_p2p_instance.map_remote_mem(local_context,
                                                                  local_device_handle,
@@ -750,24 +913,19 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
                 for (int32_t j = 0; j < send_chunk_idx; j++) {
                     src_off_set = src_off_set + chunk_size[j];
                 }
-                // view the tensor as 1D
-                size_t src_region[3] = {src_off_set, 0, 0};  // start address of src orgin
-                size_t dst_region[3] = {0, 0, 0};            // dst with no padding
-                size_t rect[3] = {chunk_size[send_chunk_idx] / dst_height, dst_height, 1};
-
-                ret = clEnqueueCopyBufferRect(local_queue,
-                                              src_buf,
-                                              dst_cl_buf,
-                                              src_region,
-                                              dst_region,
-                                              rect,
-                                              0,
-                                              0,
-                                              0,
-                                              0,
-                                              1,
-                                              &sub_mem_mgr->user_events[w_rank],
-                                              &sub_mem_mgr->step1_copy_events[w_rank]);
+                auto& copy_rect_instance = get_copy_instance(w_rank);
+                auto ele_type = copy_rect_instance.element_type_to_kernel_data_type(output_element_type);
+                copy_rect_instance.tensor_copy(
+                    local_stream,
+                    src_buf,
+                    dst_cl_buf,
+                    chunk_size[send_chunk_idx] / output_element_size,
+                    ele_type,
+                    src_off_set / output_element_size,
+                    0,
+                    1,
+                    &sub_mem_mgr->user_events[w_rank],
+                    &sub_mem_mgr->step1_copy_events[w_rank]);
                 if (ret != CL_SUCCESS) {
                     GPU_DEBUG_TRACE_DETAIL << "scatter stage clEnqueueCopyBufferRect failed: " << ", step = " << step;
                     OPENVINO_THROW("scatter stage in syn tensor failed");
@@ -842,6 +1000,18 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
                                                   2,
                                                   sub_mem_mgr->step2_add_events,
                                                   &sub_mem_mgr->step3_gather_copy_events[w_rank]);
+                    // auto& copy_rect_instance = get_copy_instance(w_rank);
+                    // auto ele_type = copy_rect_instance.element_type_to_kernel_data_type(output_element_type);
+                    // copy_rect_instance.tensor_copy(ocl_stream,
+                    //                                src_buf,
+                    //                                dst_cl_buf,
+                    //                                chunk_size[send_chunk_idx] / output_element_size,
+                    //                                ele_type,
+                    //                                off_set / output_element_size,
+                    //                                0,
+                    //                                2,
+                    //                                sub_mem_mgr->step2_add_events,
+                    //                                &sub_mem_mgr->step3_gather_copy_events[w_rank]);
                     if (ret != CL_SUCCESS) {
                         GPU_DEBUG_TRACE_DETAIL
                             << "broadcast of gather stage clEnqueueCopyBufferRect failed: " << ", step = " << step;
@@ -868,22 +1038,18 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
                     for (int32_t j = 0; j < recv_chunk_idx; j++) {
                         off_set = off_set + chunk_size[j];
                     }
-                    size_t dst_rec[3] = {off_set, 0, 0};
-                    size_t src_rec[3] = {0, 0, 0};
-                    size_t rect[3] = {chunk_size[recv_chunk_idx] / dst_height, dst_height, 1};
-                    auto ret = clEnqueueCopyBufferRect(local_queue,
-                                                       src_cl_buf_add,
-                                                       dst_cl_buf_add,
-                                                       src_rec,
-                                                       dst_rec,
-                                                       rect,
-                                                       0,
-                                                       0,
-                                                       0,
-                                                       0,
-                                                       1,
-                                                       &sub_mem_mgr->step3_gather_copy_events[dst_idx],
-                                                       &sub_mem_mgr->step4_gather_copy_events[w_rank]);
+                    auto& copy_rect_instance = get_copy_instance(w_rank);
+                    auto ele_type = copy_rect_instance.element_type_to_kernel_data_type(output_element_type);
+                    copy_rect_instance.tensor_copy(local_stream,
+                                                   src_cl_buf_add,
+                                                   dst_cl_buf_add,
+                                                   chunk_size[recv_chunk_idx] / output_element_size,
+                                                   ele_type,
+                                                   0,
+                                                   off_set / output_element_size,
+                                                   1,
+                                                   &sub_mem_mgr->step3_gather_copy_events[dst_idx],
+                                                   &sub_mem_mgr->step4_gather_copy_events[w_rank]);
                     if (ret != CL_SUCCESS) {
                         std::cout << "gather stage clEnqueueCopyBufferRect failed: " << ", step = " << step;
                         OPENVINO_THROW("gather stage of sync tensor failed: ");
