@@ -605,7 +605,7 @@ void primitive_inst::realloc_if_needed(bool prev_execution_skipped) {
     GPU_DEBUG_PROFILED_STAGE(instrumentation::pipeline_stage::memory_allocation);
     // sync tensor is supposed to always do in-place operation on input mem
     // further check gather mode
-    if (get_node().is_type<sync_tensor>())
+    if (get_node().is_type<sync_tensor>() && get_impl_params()->all_reduce)
         return;
     const auto& users = get_user_insts();
     if (users.size() == 1 && users.front()->get_node().is_type<concatenation>() && users.front()->get_node().is_runtime_skippable()) {

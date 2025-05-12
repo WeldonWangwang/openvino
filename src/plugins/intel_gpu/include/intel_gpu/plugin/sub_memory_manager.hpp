@@ -9,6 +9,7 @@
 #include <mutex>
 #include <memory>
 #include <assert.h>
+#include <CL/cl.h>
 
 namespace ov {
 namespace intel_gpu {
@@ -27,9 +28,6 @@ public:
         std::vector<cldnn::memory::ptr> recv_bufs;
         std::vector<void*> remote_mems;
         std::vector<bool> recv_flag;
-        std::vector<bool> recv_flag_concat;
-        std::vector<bool> add_flag_concat;
-        std::vector<bool> add_flag;
         std::vector<cldnn::event::ptr> events;
         cldnn::memory::ptr output;
         cldnn::layout layout;
@@ -47,9 +45,6 @@ public:
         memory_info.recv_bufs.assign(_num_sub_streams, nullptr);
         memory_info.remote_mems.assign(_num_sub_streams, nullptr);
         memory_info.recv_flag.assign(_num_sub_streams, false);
-        memory_info.recv_flag_concat.assign(_num_sub_streams, false);
-        memory_info.add_flag_concat.assign(_num_sub_streams, false);
-        memory_info.add_flag.assign(_num_sub_streams, false);
         memory_info.events.assign(_num_sub_streams, nullptr);
         std::vector<MemoryInfo> memorys;
         memorys.assign(_num_sub_streams, memory_info);
@@ -57,6 +52,10 @@ public:
         _use_count.assign(2, 0);
         result = nullptr;
         updated_flag = false;
+        step1_copy_done.store(0);
+        step2_add_done.store(0);
+        step3_concat_copy_done.store(0);
+        step4_concat_copy_done.store(0);
     }
 
     int get_memory_id(int sub_stream_id) {
@@ -79,6 +78,20 @@ public:
     void* result;
     bool updated_flag;
     std::mutex _flagMutex;
+    std::atomic<int> step1_copy_done;
+    std::atomic<int> step2_add_done;
+    std::atomic<int> step3_concat_copy_done;
+    std::atomic<int> step4_concat_copy_done;
+    cl_event user_events[2];
+    cl_event step1_copy_events[2];
+    cl_event step2_add_events[2];
+    cl_event step3_gather_copy_events[2];
+    cl_event step4_gather_copy_events[2];
+
+    cldnn::event::ptr step1_copy_events_ptr[2];
+    cldnn::event::ptr step2_add_events_ptr[2];
+    cldnn::event::ptr step3_gather_copy_events_ptr[2];
+    cldnn::event::ptr step4_gather_copy_events_ptr[2];
 };
 }  // namespace intel_gpu
 }  // namespace ov

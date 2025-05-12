@@ -588,9 +588,6 @@ void program::pre_optimize_graph(bool is_internal) {
 
     // Mark operations that might be skipped at runtime as can_be_optimized.
     apply_opt_pass<mark_runtime_skippable_nodes>();
-
-    // add tp
-    //apply_opt_pass<add_required_all_reduce>();
 }
 
 void program::post_optimize_graph(bool is_internal) {
