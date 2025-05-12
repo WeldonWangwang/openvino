@@ -678,7 +678,7 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
                 }
                 if (need_update_remote_mems || dst_cl_buf == nullptr) {
                     if (dst_cl_buf) {
-                        release_remote_mems(dst_cl_buf);
+                        //release_remote_mems(dst_cl_buf);
                     }
                     dst_cl_buf = gpu_p2p_instance.map_remote_mem(local_context,
                                                                  local_device_handle,

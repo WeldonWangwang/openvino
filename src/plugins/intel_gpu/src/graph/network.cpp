@@ -232,8 +232,7 @@ network::network(program::ptr program, stream::ptr stream, uint16_t stream_id, o
     : network(program, stream, false, stream_id == 0, sub_memory_manager) {}
 
 network::~network() {
-    auto log_level = GPU_DEBUG_VALUE_OR(get_config().get_host_time_profiling(), 0);
-    GPU_DEBUG_IF(log_level) {
+    GPU_DEBUG_IF(get_config().get_host_time_profiling()) {
         for (auto& iter : tp_host_times) {
             if (tp_host_times[iter.first].size() >= 2) {
                 double first = static_cast<double>(tp_host_times[iter.first][0]);
@@ -864,8 +863,7 @@ void network::execute_impl(const std::vector<event::ptr>& events) {
         if (needs_flushing && executed_prims % flush_frequency == 0)
             get_stream().flush();
         if (net_id == 1) {
-            auto log_level = GPU_DEBUG_VALUE_OR(get_config().get_host_time_profiling(), 0);
-            GPU_DEBUG_IF(log_level) {
+            GPU_DEBUG_IF(get_config().get_host_time_profiling()) {
                 auto end = std::chrono::high_resolution_clock::now();
                 if (inst->get_node().is_type<sync_tensor>()) {
                     if (inst->get_impl_params()->all_reduce) {
@@ -902,8 +900,8 @@ void network::execute_impl(const std::vector<event::ptr>& events) {
     for (auto& inst : _exec_order) {
         inst->reset_flags();
     }
-    auto log_level = GPU_DEBUG_VALUE_OR(get_config().get_host_time_profiling(), 0);
-    GPU_DEBUG_IF(log_level) {
+
+    GPU_DEBUG_IF(get_config().get_host_time_profiling()) {
         for (auto& iter : tp_host_times_each_iter) {
             const auto begin = std::begin(tp_host_times_each_iter[iter.first]);
             const auto end = std::end(tp_host_times_each_iter[iter.first]);
@@ -1041,6 +1039,13 @@ void network::allocate_primitive_instance(program_node const& node) {
     if (inst->is_dynamic()) {
         _is_dynamic = true;
     }
+
+    if (!node.is_type<data>()) {
+        inst->set_flag(ExecutionFlags::IMPL_CHANGED);
+        inst->set_flag(ExecutionFlags::SHAPE_CHANGED);
+        inst->set_flag(ExecutionFlags::MEMORY_CHANGED);
+    }
+
 
     _primitives[node.id()] = inst;
     if (node.is_type<input_layout>()) {

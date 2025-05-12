@@ -52,7 +52,7 @@ void sync_tensor_inst::on_execute() {
 
 void sync_tensor_inst::update_output_memory() {
     if (!can_be_optimized()) {
-        if (node->get_preferred_impl_type() == impl_types::ocl) {
+        if (_node->get_preferred_impl_type() == impl_types::ocl) {
             if (_outputs.size() == 2) {
                 // All gather need new shape output for concat
                 _outputs[1] = input_memory_ptr();

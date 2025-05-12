@@ -25,9 +25,11 @@
 #include "openvino/pass/pattern/op/wrap_type.hpp"
 #include "openvino/pass/pattern/op/or.hpp"
 #include "transformations/utils/utils.hpp"
+#include "openvino/core/graph_util.hpp"
 #include "openvino/op/slice.hpp"
 #include "openvino/op/reshape.hpp"
 #include "openvino/op/add.hpp"
+
 namespace ov {
 namespace intel_gpu {
 std::shared_ptr<ov::Node> MLPTensorParallelFusion::find_first_fc_after_multiply(std::shared_ptr<ov::Node> root_node) {

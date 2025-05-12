@@ -25,6 +25,7 @@
 #include "openvino/pass/pattern/op/wrap_type.hpp"
 #include "openvino/pass/pattern/op/or.hpp"
 #include "transformations/utils/utils.hpp"
+#include "openvino/core/graph_util.hpp"
 #include "openvino/op/slice.hpp"
 #include "openvino/op/reshape.hpp"
 #include "openvino/op/add.hpp"
