@@ -696,9 +696,6 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
             auto output_element_size = output_element_type.size();
             auto slice_pitch = output_layout.bytes_count();
             auto chunk_size = split_parts(slice_pitch, w_size);
-            auto src_width = output_layout.get_shape()[-1];
-            auto src_height = output_layout.count() / src_width;
-            auto dst_height = src_height;
             // Prepare CL memory mapping for P2P copying next
             {
                 cl_mem dst_cl_buf = nullptr;
@@ -753,24 +750,15 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
                 for (int32_t j = 0; j < send_chunk_idx; j++) {
                     src_off_set = src_off_set + chunk_size[j];
                 }
-                // view the tensor as 1D
-                size_t src_region[3] = {src_off_set, 0, 0};  // start address of src orgin
-                size_t dst_region[3] = {0, 0, 0};            // dst with no padding
-                size_t rect[3] = {chunk_size[send_chunk_idx] / dst_height, dst_height, 1};
-
-                ret = clEnqueueCopyBufferRect(local_queue,
-                                              src_buf,
-                                              dst_cl_buf,
-                                              src_region,
-                                              dst_region,
-                                              rect,
-                                              0,
-                                              0,
-                                              0,
-                                              0,
-                                              1,
-                                              &sub_mem_mgr->user_events[w_rank],
-                                              &sub_mem_mgr->step1_copy_events[w_rank]);
+                ret = clEnqueueCopyBuffer(local_queue,
+                                          src_buf,
+                                          dst_cl_buf,
+                                          src_off_set,
+                                          0,
+                                          chunk_size[send_chunk_idx],
+                                          1,
+                                          &sub_mem_mgr->user_events[w_rank],
+                                          &sub_mem_mgr->step1_copy_events[w_rank]);
                 if (ret != CL_SUCCESS) {
                     GPU_DEBUG_TRACE_DETAIL << "scatter stage clEnqueueCopyBufferRect failed: " << ", step = " << step;
                     OPENVINO_THROW("scatter stage in syn tensor failed");
@@ -830,22 +818,15 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
                     for (int32_t j = 0; j < send_chunk_idx; j++) {
                         off_set = off_set + chunk_size[j];
                     }
-                    size_t src_rec[3] = {off_set, 0, 0};
-                    size_t dst_rec[3] = {0, 0, 0};
-                    size_t rect[3] = {chunk_size[send_chunk_idx] / dst_height, dst_height, 1};
-                    ret = clEnqueueCopyBufferRect(local_queue,
-                                                  src_buf,
-                                                  dst_cl_buf,
-                                                  src_rec,
-                                                  dst_rec,
-                                                  rect,
-                                                  0,
-                                                  0,
-                                                  0,
-                                                  0,
-                                                  2,
-                                                  sub_mem_mgr->step2_add_events,
-                                                  &sub_mem_mgr->step3_gather_copy_events[w_rank]);
+                    ret = clEnqueueCopyBuffer(local_queue,
+                                              src_buf,
+                                              dst_cl_buf,
+                                              off_set,
+                                              0,
+                                              chunk_size[send_chunk_idx],
+                                              2,
+                                              sub_mem_mgr->step2_add_events,
+                                              &sub_mem_mgr->step3_gather_copy_events[w_rank]);
                     if (ret != CL_SUCCESS) {
                         GPU_DEBUG_TRACE_DETAIL
                             << "broadcast of gather stage clEnqueueCopyBufferRect failed: " << ", step = " << step;
@@ -872,22 +853,15 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
                     for (int32_t j = 0; j < recv_chunk_idx; j++) {
                         off_set = off_set + chunk_size[j];
                     }
-                    size_t dst_rec[3] = {off_set, 0, 0};
-                    size_t src_rec[3] = {0, 0, 0};
-                    size_t rect[3] = {chunk_size[recv_chunk_idx] / dst_height, dst_height, 1};
-                    auto ret = clEnqueueCopyBufferRect(local_queue,
-                                                       src_cl_buf_add,
-                                                       dst_cl_buf_add,
-                                                       src_rec,
-                                                       dst_rec,
-                                                       rect,
-                                                       0,
-                                                       0,
-                                                       0,
-                                                       0,
-                                                       1,
-                                                       &sub_mem_mgr->step3_gather_copy_events[dst_idx],
-                                                       &sub_mem_mgr->step4_gather_copy_events[w_rank]);
+                    ret = clEnqueueCopyBuffer(local_queue,
+                                              src_cl_buf_add,
+                                              dst_cl_buf_add,
+                                              0,
+                                              off_set,
+                                              chunk_size[recv_chunk_idx],
+                                              1,
+                                              &sub_mem_mgr->step3_gather_copy_events[dst_idx],
+                                              &sub_mem_mgr->step4_gather_copy_events[w_rank]);
                     if (ret != CL_SUCCESS) {
                         std::cout << "gather stage clEnqueueCopyBufferRect failed: " << ", step = " << step;
                         OPENVINO_THROW("gather stage of sync tensor failed: ");
