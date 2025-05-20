@@ -56,6 +56,7 @@ public:
         step2_add_done.store(0);
         step3_concat_copy_done.store(0);
         step4_concat_copy_done.store(0);
+        test_done.store(0);
     }
 
     int get_memory_id(int sub_stream_id) {
@@ -82,11 +83,14 @@ public:
     std::atomic<int> step2_add_done;
     std::atomic<int> step3_concat_copy_done;
     std::atomic<int> step4_concat_copy_done;
+    std::atomic<int> test_done;
     cl_event user_events[2];
     cl_event step1_copy_events[2];
     cl_event step2_add_events[2];
     cl_event step3_gather_copy_events[2];
     cl_event step4_gather_copy_events[2];
+    cl_mem xj_test_mem_1;
+    cl_mem xj_test_mem_2;
 
     cldnn::event::ptr step1_copy_events_ptr[2];
     cldnn::event::ptr step2_add_events_ptr[2];
