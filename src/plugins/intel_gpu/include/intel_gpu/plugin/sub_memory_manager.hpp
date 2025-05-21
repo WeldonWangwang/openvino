@@ -57,6 +57,8 @@ public:
         step3_concat_copy_done.store(0);
         step4_concat_copy_done.store(0);
         test_done.store(0);
+        create_internal_mem.store(0);
+        map_internal_mem.store(0);
     }
 
     int get_memory_id(int sub_stream_id) {
@@ -91,6 +93,10 @@ public:
     cl_event step4_gather_copy_events[2];
     cl_mem xj_test_mem_1;
     cl_mem xj_test_mem_2;
+    cl_mem internal_mem[2];
+    cl_mem mapped_internal_mem[2];
+    std::atomic<int> create_internal_mem;
+    std::atomic<int> map_internal_mem;
 
     cldnn::event::ptr step1_copy_events_ptr[2];
     cldnn::event::ptr step2_add_events_ptr[2];
