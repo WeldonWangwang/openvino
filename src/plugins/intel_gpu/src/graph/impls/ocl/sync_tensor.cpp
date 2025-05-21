@@ -801,82 +801,21 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
                     if (sub_mem_mgr->step1_copy_done.load() == 2)
                         break;
                 }
-                auto task = [&]() {
-                    while (true) {
-                        cl_int status;
-                        std::cout << w_rank << ", +++ 0" << std::endl;
-                        status = clGetEventInfo(sub_mem_mgr->step1_copy_events[dst_idx], CL_EVENT_COMMAND_QUEUE, sizeof(cl_command_queue), &local_queue, NULL);
-                        if (status != CL_SUCCESS) {
-                            printf("Error getting command queue: %d\n", status);
-                            return status;
-                        }
-                        std::cout << w_rank << ", +++ 1" << std::endl;
-                        clGetEventInfo(sub_mem_mgr->step1_copy_events[dst_idx], CL_EVENT_COMMAND_EXECUTION_STATUS, sizeof(cl_int), &status, NULL);
-                        std::cout << w_rank << ", +++ 2" << std::endl;
+                std::cout << "copy 1---" << std::endl;
+                ret = clEnqueueCopyBuffer(local_queue,
+                                          sub_mem_mgr->internal_mem[w_rank],
+                                          src_buf,
+                                          src_off_set,
+                                          0,
+                                          chunk_size[send_chunk_idx],
+                                          1,
+                                          &sub_mem_mgr->step1_copy_events[dst_idx],
+                                          &sub_mem_mgr->step2_add_events[w_rank]);
 
-                        switch (status) {
-                        case CL_QUEUED:
-                            printf("Event %d is queued\n", w_rank);
-                        case CL_SUBMITTED:
-                            printf("Event %d is submitted\n", w_rank);
-                        case CL_RUNNING:
-                            printf("Event %d is running\n", w_rank);
-                        case CL_COMPLETE:
-                            printf("Event %d completed\n", w_rank);
-                            return 0;
-                        default:
-                            printf("Error status: %d\n", status);
-                            break;
-                        }
-
-                        usleep(100000);  // 每1ms检查一次
-                    }
-                    return 0;
-                };
-                std::thread t0(task);
-                if (w_rank == 0) {
-                    std::cout << "copy 1---" << std::endl;
-                    ret = clEnqueueCopyBuffer(local_queue,
-                                              sub_mem_mgr->internal_mem[w_rank],
-                                              src_buf,
-                                              src_off_set,
-                                              0,
-                                              chunk_size[send_chunk_idx],
-                                              1,
-                                              &sub_mem_mgr->step1_copy_events[dst_idx],
-                                              &sub_mem_mgr->step2_add_events[w_rank]);
-
-                    std::cout << "copy 2---" << std::endl;
-                    if (ret != CL_SUCCESS) {
-                        GPU_DEBUG_TRACE_DETAIL << "scatter stage clEnqueueCopyBufferRect failed: " << ", step = " << step;
-                        OPENVINO_THROW("scatter stage in syn tensor failed");
-                    }
-                }
-                if (w_rank == 1) {
-                    std::cout << "copy 1---" << std::endl;
-                    ret = clEnqueueCopyBuffer(local_queue,
-                                              sub_mem_mgr->internal_mem[w_rank],
-                                              src_buf,
-                                              src_off_set,
-                                              0,
-                                              chunk_size[send_chunk_idx],
-                                              1,
-                                              &sub_mem_mgr->step1_copy_events[dst_idx],
-                                              &sub_mem_mgr->step2_add_events[w_rank]);
-
-                    std::cout << "copy 2---" << std::endl;
-                    if (ret != CL_SUCCESS) {
-                        GPU_DEBUG_TRACE_DETAIL << "scatter stage clEnqueueCopyBufferRect failed: " << ", step = " << step;
-                        OPENVINO_THROW("scatter stage in syn tensor failed");
-                    }
-                }
-                if (t0.joinable())
-                    t0.join();
-                clWaitForEvents(1, &sub_mem_mgr->step2_add_events[w_rank]);
-                sub_mem_mgr->step2_add_done.fetch_add(1);
-                while (true) {
-                    if (sub_mem_mgr->step2_add_done.load() == 2)
-                        break;
+                std::cout << "copy 2---" << std::endl;
+                if (ret != CL_SUCCESS) {
+                    GPU_DEBUG_TRACE_DETAIL << "scatter stage clEnqueueCopyBufferRect failed: " << ", step = " << step;
+                    OPENVINO_THROW("scatter stage in syn tensor failed");
                 }
 
                 // if (w_rank == 0)
