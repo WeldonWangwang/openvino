@@ -126,6 +126,8 @@ public:
     static void RegisterFactory(factory_t func) {
         std::lock_guard<std::mutex> lock(m_mutex);
         if (ProgramBuilder::factories_map.find(OpType::get_type_info_static()) == ProgramBuilder::factories_map.end()) {
+            if (std::string(OpType::get_type_info_static().name) == "SYNCTENSOR")
+                std::cout << "break" << std::endl;
             ProgramBuilder::factories_map.insert({OpType::get_type_info_static(), func});
         }
     }

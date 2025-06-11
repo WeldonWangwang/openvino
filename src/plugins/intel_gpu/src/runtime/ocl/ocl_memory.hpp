@@ -8,7 +8,7 @@
 #include "ocl_engine.hpp"
 #include "ocl_stream.hpp"
 #include "intel_gpu/runtime/memory.hpp"
-
+#include <CL/cl_ext.h>
 #include <cassert>
 #include <iterator>
 #include <mutex>
@@ -52,6 +52,7 @@ struct gpu_buffer : public lockable_gpu_mem, public memory {
 #endif
 
 protected:
+    clCreateBufferWithPropertiesINTEL_fn _create_buffer_with_properties_fn = nullptr;
     cl::Buffer _buffer;
 };
 

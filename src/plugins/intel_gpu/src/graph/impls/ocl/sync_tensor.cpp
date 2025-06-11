@@ -734,7 +734,7 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
             cl_int ret;
             for (int32_t step = 0; step < static_cast<int>(w_size) - 1; step++) {
                 // TODO: need check why enqueue hang, when the dependent event in status CL_SUBMITTED
-                sub_mem_mgr->user_events[w_rank] = clCreateUserEvent(local_context, &ret);
+                //sub_mem_mgr->user_events[w_rank] = clCreateUserEvent(local_context, &ret);
                 if (ret != CL_SUCCESS) {
                     OPENVINO_THROW("create null event failed!");
                 }
@@ -775,6 +775,7 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
                     GPU_DEBUG_TRACE_DETAIL << "scatter stage clEnqueueCopyBufferRect failed: " << ", step = " << step;
                     OPENVINO_THROW("scatter stage in syn tensor failed");
                 }
+                clWaitForEvents(1, &sub_mem_mgr->step1_copy_events[w_rank]);
                 sub_mem_mgr->step1_copy_events_ptr[w_rank] =
                 ocl_stream.create_event(cl::Event(sub_mem_mgr->step1_copy_events[w_rank]));
 
@@ -805,7 +806,7 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
                     1,
                     &sub_mem_mgr->step1_copy_events[dst_idx],
                     &sub_mem_mgr->step2_add_events[w_rank]);
-
+                clWaitForEvents(1, &sub_mem_mgr->step2_add_events[w_rank]);
                 sub_mem_mgr->step2_add_events_ptr[w_rank] =
                     ocl_stream.create_event(cl::Event(sub_mem_mgr->step2_add_events[w_rank]));
                 sub_mem_mgr->step2_add_done.fetch_add(1);
@@ -851,6 +852,7 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
                             << "broadcast of gather stage clEnqueueCopyBufferRect failed: " << ", step = " << step;
                         OPENVINO_THROW("broadcast stage in sync tensor failed: ");
                     }
+                    clWaitForEvents(1, &sub_mem_mgr->step3_gather_copy_events[w_rank]);
                     sub_mem_mgr->step3_gather_copy_events_ptr[w_rank] =
                     ocl_stream.create_event(cl::Event(sub_mem_mgr->step3_gather_copy_events[w_rank]));
 
@@ -892,14 +894,23 @@ struct sync_tensor_impl : public typed_primitive_impl<sync_tensor> {
                         std::cout << "gather stage clEnqueueCopyBufferRect failed: " << ", step = " << step;
                         OPENVINO_THROW("gather stage of sync tensor failed: ");
                     }
+                    clWaitForEvents(1, &sub_mem_mgr->step4_gather_copy_events[w_rank]);
                     sub_mem_mgr->step4_gather_copy_events_ptr[w_rank] =
                     ocl_stream.create_event(cl::Event(sub_mem_mgr->step4_gather_copy_events[w_rank]));
-
-                    ret = clSetUserEventStatus(sub_mem_mgr->user_events[w_rank], CL_COMPLETE);
+                    Timer timer1(w_rank);
+                    timer1.measure_start(std::string("hack stage"));
+                    //ret = clSetUserEventStatus(sub_mem_mgr->user_events[w_rank], CL_COMPLETE);
+                    // check src buffer
+                    /*if (instance.id().find("layers.0.self_attn.o_proj") != std::string::npos) {
+                        std::cout << "checking buffer" << std::endl;
+                        cldnn::mem_lock<ov::float16, cldnn::mem_lock_type::read> lock(sub_mem_mgr->_memorys_table[id][w_rank].recv_bufs[0], local_stream);
+                        std::cout << "my rank is " << w_rank << ", my first is " << lock[0] << ", and " << lock[56320] << std::endl;
+                    }
+                    timer1.measure_end(std::string("hack stage"));*/
                     if (ret != CL_SUCCESS) {
                         OPENVINO_THROW("sync tensor trigger all-reduce execute failed!");
                     }
-                    sync_events.push_back(sub_mem_mgr->step4_gather_copy_events_ptr[w_rank]);
+                    //sync_events.push_back(sub_mem_mgr->step4_gather_copy_events_ptr[w_rank]);
                 }
             }
             timer.measure_end(std::string("gather stage for Ring all-reduce"));

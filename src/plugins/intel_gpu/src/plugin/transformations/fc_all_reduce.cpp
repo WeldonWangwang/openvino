@@ -12,7 +12,7 @@
 #include "intel_gpu/op/placeholder.hpp"
 #include "intel_gpu/op/rank_constant.hpp"
 #include "intel_gpu/op/sync_tensor.hpp"
-
+#include "intel_gpu/op/all_reduce.hpp"
 #include "openvino/core/rt_info.hpp"
 #include "openvino/core/validation_util.hpp"
 #include "openvino/op/concat.hpp"
@@ -84,7 +84,7 @@ FCALLReduce::FCALLReduce(size_t world_size, size_t world_rank) {
             split_dim_range = reshaped_pshape.to_shape()[split_axis];
             {
                 // transform to rank constant
-                std::cout << "m_data: " << m_data->get_shape() << std::endl;
+                //std::cout << "m_data: " << m_data->get_shape() << std::endl;
                 std::cout << "weight_node: " << weight_node->get_shape() << std::endl;
 
                 int slice_axis_length = m_data->get_output_partial_shape(0)[-1].get_length();
@@ -98,7 +98,7 @@ FCALLReduce::FCALLReduce(size_t world_size, size_t world_rank) {
 
                 // auto ranked_data = std::make_shared<ov::intel_gpu::op::RankConstant>(m_data, world_size, world_rank, tp_mode);
                 auto ranked_weight = std::make_shared<ov::intel_gpu::op::RankConstant>(weight_node, world_size, world_rank, tp_mode);
-                std::cout << "data_slice: " << data_slice->get_shape() << std::endl;
+                //std::cout << "data_slice: " << data_slice->get_shape() << std::endl;
                 std::cout << "ranked_weight: " << ranked_weight->get_shape() << std::endl;
                 std::shared_ptr<ov::Node> ranked_bias, ranked_scale, ranked_zp;
                 if (!std::dynamic_pointer_cast<op::Placeholder>(m_bias)) {
@@ -169,18 +169,15 @@ FCALLReduce::FCALLReduce(size_t world_size, size_t world_rank) {
                 }
                 auto new_fc = split_fc(m_fc, op::TP_MODE::ALL_REDUCE).first;
                 new_fc->get_rt_info().insert({"splitted", true});
-                std::shared_ptr<ov::intel_gpu::op::SyncTensor> sync_node;
-                sync_node =
-                    std::make_shared<ov::intel_gpu::op::SyncTensor>(new_fc,
+                std::shared_ptr<ov::intel_gpu::op::AllReduce> allreduce_node;
+                allreduce_node =
+                    std::make_shared<ov::intel_gpu::op::AllReduce>(new_fc,
                                                                     world_size,
-                                                                    world_rank,
-                                                                    m_fc->get_input_node_shared_ptr(1)->get_shape()[-1],
-                                                                    m_fc->get_element_type(),
-                                                                    ov::intel_gpu::op::TP_MODE::ALL_REDUCE);
-                sync_node->set_friendly_name(m_fc->get_friendly_name() + "_TP");
+                                                                    world_rank);
+                allreduce_node->set_friendly_name(m_fc->get_friendly_name() + "_TP");
                 copy_runtime_info(m_fc, new_fc);
                 for (auto& iter : org_users) {
-                    iter.second->input(iter.first).replace_source_output(sync_node->output(0));
+                    iter.second->input(iter.first).replace_source_output(allreduce_node->output(0));
                 }
                 m_fc->clear_control_dependencies();
             }

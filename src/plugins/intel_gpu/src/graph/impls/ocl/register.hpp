@@ -67,7 +67,7 @@
 #include "intel_gpu/primitives/kv_cache.hpp"
 #include "intel_gpu/primitives/scaled_dot_product_attention.hpp"
 #include "intel_gpu/primitives/sync_tensor.hpp"
-
+#include "intel_gpu/primitives/all_reduce.hpp"
 namespace cldnn {
 namespace ocl {
 void register_implementations();
@@ -159,6 +159,7 @@ REGISTER_OCL(scaled_dot_product_attention);
 REGISTER_OCL(search_sorted);
 REGISTER_OCL(STFT);
 REGISTER_OCL(sync_tensor);
+REGISTER_OCL(all_reduce);
 REGISTER_OCL(ISTFT);
 
 #undef REGISTER_OCL

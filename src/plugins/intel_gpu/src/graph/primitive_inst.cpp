@@ -23,6 +23,7 @@
 #include "loop_inst.h"
 #include "deconvolution_inst.h"
 #include "sync_tensor_inst.h"
+#include "all_reduce_inst.h"
 #include "shape_of_inst.h"
 #include "softmax_inst.h"
 #include "strided_slice_inst.h"
@@ -1129,6 +1130,9 @@ void primitive_inst::realloc_if_needed(bool prev_execution_skipped) {
         const auto& buffer_descs = _impl->get_internal_buffer_descs(*_impl_params);
         if (buffer_descs.empty())
             return;
+        if (_node->is_type<all_reduce>()) {
+            std::cout << "break" << std::endl;
+        }
         GPU_DEBUG_CODE(std::string memalloc_info = "");
         for (size_t i = 0; i < buffer_descs.size(); ++i) {
             auto need_lockable = buffer_descs[i].m_lockable;
@@ -1149,6 +1153,12 @@ void primitive_inst::realloc_if_needed(bool prev_execution_skipped) {
                 const bool need_reset = false;
                 if (i < _intermediates_memory.size()) {
                     _intermediates_memory[i] = allocate_internal_buffer(buffer_descs[i].m_layout, i, need_reset, need_lockable);
+                    if (_node->is_type<all_reduce>()) {
+                        GPU_DEBUG_COUT << "intermediate allocated for " << _node->id() << " with layout "
+                                  << _intermediates_memory[i]->get_layout().to_short_string() << std::endl;
+                        GPU_DEBUG_COUT << "intermediate allocated for " << _node->id() << " with size "
+                                  << _intermediates_memory[i]->size() << std::endl;
+                    }
                     max_intermediates_memory_sizes[i] = _intermediates_memory[i]->size();
                 } else {
                     // i-th layout has not been allocated yet
@@ -1960,6 +1970,8 @@ void primitive_inst::prepare_primitive() {
         // Only try update weight and realloc when impl is updated.
         const bool can_use_async_compilation = use_async_compilation();
         const bool shape_changed = get_flag(ExecutionFlags::SHAPE_CHANGED);
+        if (get_node().is_type<all_reduce>())
+            std::cout << "break" << std::endl; // TODO: remove debug line
         if (shape_changed || !_impl || (!shape_changed && _impl->is_dynamic() && can_use_async_compilation)) {
             update_impl(can_use_async_compilation);
             if (get_flag(ExecutionFlags::IMPL_CHANGED)) {
@@ -2272,6 +2284,8 @@ memory::ptr primitive_inst::allocate_internal_buffer(const layout& layout, size_
                       << available_device_mem_size << ") <= requested memory (" << layout.bytes_count() << " )" << std::endl;
         alloc_type = engine.get_lockable_preferred_memory_allocation_type();
     }
+    if (get_node().is_type<all_reduce>())
+        alloc_type = allocation_type::cl_mem; // hard code to cl_mem
     GPU_DEBUG_LOG << "=> allocate to " << alloc_type << std::endl;
 
     // Reuse intermediate buffer like output buffer.
@@ -2505,7 +2519,7 @@ memory::ptr primitive_inst::allocate_output(engine& _engine,
         }
         if (is_output_buffer && getenv("OV_ENABLE_LAST_FC"))
             alloc_type = allocation_type::cl_mem;
-        if (node.is_type<sync_tensor>()) {
+        if (node.is_type<sync_tensor>() || node.is_type<all_reduce>()) {
             alloc_type = allocation_type::cl_mem;
             // std::cout << "Sync_tensor allocate: shape = " << layout.get_shape().to_string() << ", impl_params.layout["
             //           << idx << "] = " << out_layout.to_short_string() << std::endl;
@@ -2858,6 +2872,8 @@ ImplementationsFactory::ImplementationsFactory(const program_node* node)
     , m_available_impls(node->type()->get_supported_implementations(*node))
     , m_static_impls_cache(node->get_program().get_implementations_cache())
     , m_dynamic_impls_cache() {
+    if (node->is_type<all_reduce>())
+        std::cout << "break" << std::endl;
     if (node->get_selected_impl() && node->get_selected_impl()->is_dynamic()) {
         m_dynamic_impls_cache.emplace_back(node->get_selected_impl()->clone());
     }
@@ -2882,6 +2898,8 @@ std::shared_ptr<primitive_impl> ImplementationsFactory::get_primitive_impl_for_p
     };
 
     const auto node = &inst.get_node();
+    if (node->is_type<all_reduce>())
+        std::cout << "break" << std::endl;
     auto& prog = *inst.get_network().get_program();
     auto& kernels_cache = prog.get_kernels_cache();
 

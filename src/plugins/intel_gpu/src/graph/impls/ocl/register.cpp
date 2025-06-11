@@ -86,6 +86,7 @@ void register_implementations() {
     REGISTER_OCL(search_sorted);
     REGISTER_OCL(STFT);
     REGISTER_OCL(sync_tensor);
+    REGISTER_OCL(all_reduce);
     REGISTER_OCL(ISTFT);
 }
 

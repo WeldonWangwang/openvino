@@ -3,35 +3,34 @@
 //
 
 #include "pa_tensor_parallel.hpp"
-#include "intel_gpu/op/fully_connected.hpp"
-#include "intel_gpu/op/fully_connected_compressed.hpp"
+
 #include <memory>
 #include <vector>
 
 #include "intel_gpu/op/fully_connected.hpp"
+#include "intel_gpu/op/fully_connected_compressed.hpp"
 #include "intel_gpu/op/placeholder.hpp"
 #include "intel_gpu/op/rank_constant.hpp"
 #include "intel_gpu/op/sync_tensor.hpp"
-
+#include "openvino/core/graph_util.hpp"
 #include "openvino/core/rt_info.hpp"
 #include "openvino/core/validation_util.hpp"
-#include "openvino/op/concat.hpp"
-#include "openvino/op/swish.hpp"
-#include "openvino/op/multiply.hpp"
-#include "openvino/op/constant.hpp"
-#include "openvino/op/variadic_split.hpp"
-#include "openvino/pass/pattern/op/pattern.hpp"
-#include "openvino/op/paged_attention.hpp"
-#include "openvino/pass/pattern/op/wrap_type.hpp"
-#include "openvino/pass/pattern/op/or.hpp"
-#include "transformations/utils/utils.hpp"
-#include "openvino/core/graph_util.hpp"
-#include "openvino/op/slice.hpp"
-#include "openvino/op/reshape.hpp"
 #include "openvino/op/add.hpp"
-#include "openvino/op/transpose.hpp"
+#include "openvino/op/concat.hpp"
+#include "openvino/op/constant.hpp"
 #include "openvino/op/gather.hpp"
+#include "openvino/op/multiply.hpp"
+#include "openvino/op/paged_attention.hpp"
+#include "openvino/op/reshape.hpp"
+#include "openvino/op/slice.hpp"
+#include "openvino/op/swish.hpp"
+#include "openvino/op/transpose.hpp"
+#include "openvino/op/variadic_split.hpp"
+#include "openvino/pass/pattern/op/or.hpp"
+#include "openvino/pass/pattern/op/pattern.hpp"
+#include "openvino/pass/pattern/op/wrap_type.hpp"
 #include "ov_ops/rotary_positional_embeddings.hpp"
+#include "transformations/utils/utils.hpp"
 namespace ov {
 namespace intel_gpu {
 
@@ -43,8 +42,7 @@ std::shared_ptr<ov::Node> PATensorParallelFusion::find_first_fc_before_pa(std::s
         return get_output_node(input.get_source_output());
     };
     auto cur_node = get_input_node(root_node->inputs()[0]);
-    if (ov::is_type<ov::intel_gpu::op::FullyConnectedCompressed>(cur_node) ||
-        ov::is_type<ov::intel_gpu::op::FullyConnected>(cur_node)) {
+    if (ov::is_type<ov::intel_gpu::op::FullyConnectedCompressed>(cur_node) || ov::is_type<ov::intel_gpu::op::FullyConnected>(cur_node)) {
         return cur_node;
     }
     return find_first_fc_before_pa(cur_node);
@@ -85,8 +83,8 @@ std::shared_ptr<ov::Node> PATensorParallelFusion::find_first_fc_after_pa(std::sh
 }
 
 void PATensorParallelFusion::find_ops_in_fc_to_pa(std::shared_ptr<ov::Node> input) {
-    if (ov::is_type<ov::intel_gpu::op::FullyConnectedCompressed>(input) ||
-        ov::is_type<ov::intel_gpu::op::FullyConnected>(input) || ov::is_type<ov::op::internal::RoPE>(input)) {
+    if (ov::is_type<ov::intel_gpu::op::FullyConnectedCompressed>(input) || ov::is_type<ov::intel_gpu::op::FullyConnected>(input) ||
+        ov::is_type<ov::op::internal::RoPE>(input)) {
         if (has_visited.insert(input).second) {
             vector_visited.push_back(input);
         }
@@ -122,8 +120,7 @@ void PATensorParallelFusion::find_ops_in_pa_to_fc(std::shared_ptr<ov::Node> inpu
         if (ov::is_type<ov::op::v0::Result>(cur_node)) {
             continue;
         }
-        if (ov::is_type<ov::intel_gpu::op::FullyConnectedCompressed>(cur_node) ||
-            ov::is_type<ov::intel_gpu::op::FullyConnected>(cur_node)) {
+        if (ov::is_type<ov::intel_gpu::op::FullyConnectedCompressed>(cur_node) || ov::is_type<ov::intel_gpu::op::FullyConnected>(cur_node)) {
             if (has_visited.insert(cur_node).second) {
                 vector_visited.push_back(cur_node);
             }
@@ -146,8 +143,8 @@ PATensorParallelFusion::PATensorParallelFusion(size_t world_size, size_t world_r
         std::shared_ptr<Node> m_pa = nullptr;
         m_pa = pattern_map.at(paged_attention).get_node_shared_ptr();
 
-        auto split_fc = [&](std::shared_ptr<ov::Node>& org_fc,
-                            op::TP_MODE tp_mode, const std::vector<int64_t> qkv_parts) -> std::pair<std::shared_ptr<ov::Node>, size_t> {
+        auto split_fc =
+            [&](std::shared_ptr<ov::Node>& org_fc, op::TP_MODE tp_mode, const std::vector<int64_t> qkv_parts) -> std::pair<std::shared_ptr<ov::Node>, size_t> {
             const auto& m_data = org_fc->get_input_node_shared_ptr(0);
             const auto& weight_node = org_fc->get_input_node_shared_ptr(1);
             const auto& m_bias = org_fc->get_input_node_shared_ptr(2);
@@ -161,7 +158,7 @@ PATensorParallelFusion::PATensorParallelFusion(size_t world_size, size_t world_r
                     auto static_shape = shape.to_shape();
                     size_t total = std::accumulate(static_shape.begin(), static_shape.end(), static_cast<size_t>(1), std::multiplies<size_t>());
                     auto dim = feature.is_static() ? feature.get_length() : static_cast<int64_t>(static_shape[rank - 1]);
-                    return ov::PartialShape{ static_cast<int64_t>(total) / dim, dim }.to_shape();
+                    return ov::PartialShape{static_cast<int64_t>(total) / dim, dim}.to_shape();
                 };
                 auto input0_pshape = org_fc->get_input_node_shared_ptr(0)->get_output_partial_shape(0);
                 auto feature = input0_pshape[input0_pshape.size() - 1ul];
@@ -182,8 +179,7 @@ PATensorParallelFusion::PATensorParallelFusion(size_t world_size, size_t world_r
                     if (tp_mode == op::TP_MODE::ALL_REDUCE) {
                         ranked_scale = scale_node;
                         if (scale_node->get_shape()[1] > 1)
-                            ranked_scale =
-                                std::make_shared<ov::intel_gpu::op::RankConstant>(scale_node, world_size, world_rank, tp_mode, qkv_parts);
+                            ranked_scale = std::make_shared<ov::intel_gpu::op::RankConstant>(scale_node, world_size, world_rank, tp_mode, qkv_parts);
                     } else {
                         ranked_scale = std::make_shared<ov::intel_gpu::op::RankConstant>(scale_node, world_size, world_rank, tp_mode, qkv_parts);
                     }
@@ -195,8 +191,7 @@ PATensorParallelFusion::PATensorParallelFusion(size_t world_size, size_t world_r
                         if (!is_scalar) {
                             if (tp_mode == op::TP_MODE::ALL_REDUCE) {
                                 if (zp_node->get_shape()[1] > 1)
-                                    ranked_zp =
-                                        std::make_shared<ov::intel_gpu::op::RankConstant>(zp_node, world_size, world_rank, tp_mode, qkv_parts);
+                                    ranked_zp = std::make_shared<ov::intel_gpu::op::RankConstant>(zp_node, world_size, world_rank, tp_mode, qkv_parts);
                             } else {
                                 ranked_zp = std::make_shared<ov::intel_gpu::op::RankConstant>(zp_node, world_size, world_rank, tp_mode, qkv_parts);
                             }
@@ -206,41 +201,31 @@ PATensorParallelFusion::PATensorParallelFusion(size_t world_size, size_t world_r
                 auto output_type = org_fc->get_output_element_type(0);
                 if (compressed_fc) {
                     if (compressed_fc->inputs().size() > 4)
-                        splitted_fc = std::make_shared<op::FullyConnectedCompressed>(
-                            m_data,
-                            ranked_weight,
-                            ranked_bias ? ranked_bias : m_bias,
-                            ranked_scale,
-                            ranked_zp ? ranked_zp : compressed_fc->get_input_node_shared_ptr(4),
-                            output_type);
+                        splitted_fc = std::make_shared<op::FullyConnectedCompressed>(m_data,
+                                                                                     ranked_weight,
+                                                                                     ranked_bias ? ranked_bias : m_bias,
+                                                                                     ranked_scale,
+                                                                                     ranked_zp ? ranked_zp : compressed_fc->get_input_node_shared_ptr(4),
+                                                                                     output_type);
                     else
-                        splitted_fc = std::make_shared<op::FullyConnectedCompressed>(
-                            m_data,
-                            ranked_weight,
-                            ranked_bias ? ranked_bias : m_bias,
-                            ranked_scale,
-                            output_type);
+                        splitted_fc = std::make_shared<op::FullyConnectedCompressed>(m_data,
+                                                                                     ranked_weight,
+                                                                                     ranked_bias ? ranked_bias : m_bias,
+                                                                                     ranked_scale,
+                                                                                     output_type);
 
                 } else {
-                    splitted_fc = std::make_shared<op::FullyConnected>(m_data,
-                                                                ranked_weight,
-                                                                ranked_bias ? ranked_bias : m_bias,
-                                                                output_type);
+                    splitted_fc = std::make_shared<op::FullyConnected>(m_data, ranked_weight, ranked_bias ? ranked_bias : m_bias, output_type);
                 }
                 org_fc->get_rt_info().insert({"splitted", true});
                 return {splitted_fc, split_dim_range};
             }
         };
-        auto new_variadicsplit_node =
-            [](std::shared_ptr<ov::Node>& split_node,
-                std::vector<int64_t>& split_parts) {
+        auto new_variadicsplit_node = [](std::shared_ptr<ov::Node>& split_node, std::vector<int64_t>& split_parts) {
             auto split_name = split_node->get_friendly_name() + "_tp";
-            auto axis = ov::op::v0::Constant::create(ov::element::i64,
-                                                     ov::Shape{1},
-                                                     {split_node->get_input_partial_shape(0).size() - 1});
+            auto axis = ov::op::v0::Constant::create(ov::element::i64, ov::Shape{1}, {split_node->get_input_partial_shape(0).size() - 1});
 
-            auto split_axis_value =
-                split_node->get_input_partial_shape(0)[split_node->get_input_partial_shape(0).size() - 1].get_length();
+            auto split_axis_value = split_node->get_input_partial_shape(0)[split_node->get_input_partial_shape(0).size() - 1].get_length();
             auto split_values = split_parts;
             int32_t split_unit_size = split_axis_value / std::accumulate(split_parts.begin(), split_parts.end(), 0);
             std::for_each(split_values.begin(), split_values.end(), [&](int64_t& d) {
@@ -248,15 +233,12 @@ PATensorParallelFusion::PATensorParallelFusion(size_t world_size, size_t world_r
             });
 
             auto split_const = ov::op::v0::Constant::create(ov::element::i64, ov::Shape{3}, split_values);
-            auto new_split = std::make_shared<ov::op::v1::VariadicSplit>(split_node->get_input_node_shared_ptr(0),
-                                                                         axis,
-                                                                         split_const);
+            auto new_split = std::make_shared<ov::op::v1::VariadicSplit>(split_node->get_input_node_shared_ptr(0), axis, split_const);
             new_split->set_friendly_name(split_name);
             copy_runtime_info(split_node, new_split);
             replace_node(split_node, new_split);
         };
-        auto new_reshape_node =
-            [](std::shared_ptr<ov::Node>& reshape_node, const int& half_head_num, const int& head_size) {
+        auto new_reshape_node = [](std::shared_ptr<ov::Node>& reshape_node, const int& half_head_num, const int& head_size) {
             std::vector<int32_t> new_shape = {};
             auto input_shape = reshape_node->get_input_partial_shape(0);
             int64_t sum_size = 1;
@@ -275,8 +257,8 @@ PATensorParallelFusion::PATensorParallelFusion(size_t world_size, size_t world_r
                 new_shape.push_back(out_put_shape[i].get_length());
             }
             for (size_t i = 0; i < out_put_shape.size(); i++) {
-                if (!(out_put_shape[i].is_dynamic()) && !(out_put_shape[i].compatible(1)) &&
-                    !(out_put_shape[i].compatible(3)) && !(out_put_shape[i].compatible(128))) {
+                if (!(out_put_shape[i].is_dynamic()) && !(out_put_shape[i].compatible(1)) && !(out_put_shape[i].compatible(3)) &&
+                    !(out_put_shape[i].compatible(128))) {
                     if (out_put_shape.size() == 2)
                         new_shape[i] = sum_size;
                     else
@@ -285,25 +267,21 @@ PATensorParallelFusion::PATensorParallelFusion(size_t world_size, size_t world_r
                 }
             }
             if ((out_put_shape.size() == 4) && (out_put_shape[2].compatible(3)))
-                new_shape[3] = sum_size/3;
+                new_shape[3] = sum_size / 3;
             if (out_put_shape.size() == 3)
                 new_shape[2] = sum_size;
-            auto shape0 =
-                std::make_shared<ov::op::v0::Constant>(ov::element::i32,
-                                                       ov::Shape{reshape_node->get_output_partial_shape(0).size()},
-                                                       new_shape);
-            auto new_reshape =
-                std::make_shared<ov::op::v1::Reshape>(reshape_node->get_input_source_output(0), shape0, true);
+            auto shape0 = std::make_shared<ov::op::v0::Constant>(ov::element::i32, ov::Shape{reshape_node->get_output_partial_shape(0).size()}, new_shape);
+            auto new_reshape = std::make_shared<ov::op::v1::Reshape>(reshape_node->get_input_source_output(0), shape0, true);
             new_reshape->set_friendly_name(reshape_node->get_friendly_name() + "_tp");
             copy_runtime_info(reshape_node, new_reshape);
             replace_node(reshape_node, new_reshape);
         };
         auto new_add_node = [&](std::shared_ptr<ov::Node>& add_node, const std::vector<int64_t> qkv_parts) {
-            auto rank_constant =
-                std::make_shared<ov::intel_gpu::op::RankConstant>(add_node->get_input_node_shared_ptr(1),
-                                                                  world_size,
-                                                                  world_rank,
-                                                                  op::TP_MODE::ALL_REDUCE, qkv_parts);
+            auto rank_constant = std::make_shared<ov::intel_gpu::op::RankConstant>(add_node->get_input_node_shared_ptr(1),
+                                                                                   world_size,
+                                                                                   world_rank,
+                                                                                   op::TP_MODE::ALL_REDUCE,
+                                                                                   qkv_parts);
             auto new_add = std::make_shared<ov::op::v1::Add>(add_node->get_input_source_output(0), rank_constant);
             new_add->set_friendly_name(add_node->get_friendly_name() + "_tp");
             copy_runtime_info(add_node, new_add);
@@ -329,27 +307,53 @@ PATensorParallelFusion::PATensorParallelFusion(size_t world_size, size_t world_r
             }
         };
         auto fc_after_pa_sync = [&](std::shared_ptr<ov::Node>& fc_node, const std::vector<int64_t> qkv_parts) {
-            std::map<int, std::shared_ptr<ov::Node>> org_users;
-            for (auto u : fc_node->get_users()) {
+            // std::map<int, std::shared_ptr<ov::Node>> org_fc_users;
+            std::multimap<int, std::shared_ptr<ov::Node>> org_users;
+            /*for (auto u : fc_node->get_users()) {
                 for (size_t idx = 0; idx < u->inputs().size(); ++idx) {
                     if (u->get_input_node_shared_ptr(idx) == fc_node) {
-                        org_users.insert({idx, u});
+                        org_fc_users.insert({idx, u});
                     }
                 }
-            }
+            }*/
             auto new_fc = split_fc(fc_node, op::TP_MODE::ALL_REDUCE, qkv_parts).first;
             new_fc->set_friendly_name(fc_node->get_friendly_name());
             new_fc->get_rt_info().insert({"splitted", true});
-            std::shared_ptr<ov::intel_gpu::op::SyncTensor> sync_node;
-            sync_node =
-                std::make_shared<ov::intel_gpu::op::SyncTensor>(new_fc,
-                                                                world_size,
-                                                                world_rank,
-                                                                fc_node->get_input_node_shared_ptr(1)->get_shape()[-1],
-                                                                fc_node->get_element_type(),
-                                                                ov::intel_gpu::op::TP_MODE::ALL_REDUCE);
-            sync_node->set_friendly_name(fc_node->get_friendly_name() + "_TP");
             copy_runtime_info(fc_node, new_fc);
+            replace_node(fc_node, new_fc);
+            std::shared_ptr<ov::Node> parent_node = new_fc;
+            for (auto& iter : new_fc->get_users()) {
+                if (ov::is_type<ov::op::v1::Add>(iter)) {
+                    for (auto u : iter->get_users()) {
+                        for (size_t idx = 0; idx < u->inputs().size(); ++idx) {
+                            if (u->get_input_node_shared_ptr(idx) == iter) {
+                                org_users.insert({idx, u});
+                                std::cout << "idx is" << idx << "user is" << u->get_friendly_name() << std::endl;
+                            }
+                        }
+                    }
+                    parent_node = iter;
+                }
+            }
+            // add a compensation
+            if (ov::is_type<ov::op::v1::Add>(parent_node)) {
+                //if (parent_node->get_input_size() != 2)
+                    //return false;
+                for (size_t i = 0; i < parent_node->get_input_size(); i++)
+                    if (parent_node->get_input_node_shared_ptr(i) != new_fc) {
+                        auto divide_node = std::make_shared<ov::op::v1::Multiply>(parent_node->get_input_node_shared_ptr(i),
+                                                                                  ov::op::v0::Constant::create(ov::element::f16, ov::Shape{1}, {0.5}));
+                        parent_node->input(i).replace_source_output(divide_node->output(0));
+                    }
+            }
+            std::shared_ptr<ov::intel_gpu::op::SyncTensor> sync_node;
+            sync_node = std::make_shared<ov::intel_gpu::op::SyncTensor>(parent_node,
+                                                                        world_size,
+                                                                        world_rank,
+                                                                        fc_node->get_input_node_shared_ptr(1)->get_shape()[-1],
+                                                                        fc_node->get_element_type(),
+                                                                        ov::intel_gpu::op::TP_MODE::ALL_REDUCE);
+            sync_node->set_friendly_name(fc_node->get_friendly_name() + "_TP");
             for (auto& iter : org_users) {
                 iter.second->input(iter.first).replace_source_output(sync_node->output(0));
             }
@@ -361,9 +365,8 @@ PATensorParallelFusion::PATensorParallelFusion(size_t world_size, size_t world_r
             const auto has_rt_params = rt_info.find("k_head_size") != rt_info.end();
             int half_head_num = m_pa->get_input_node_shared_ptr(3)->get_output_partial_shape(0)[1].get_length();
             // value head size may differ from key head size?
-            int head_size = has_rt_params
-                                ? rt_info.at("k_head_size").as<int64_t>()
-                                : m_pa->get_input_node_shared_ptr(3)->get_output_partial_shape(0)[2].get_length();
+            int head_size =
+                has_rt_params ? rt_info.at("k_head_size").as<int64_t>() : m_pa->get_input_node_shared_ptr(3)->get_output_partial_shape(0)[2].get_length();
             int q_size = m_pa->get_input_node_shared_ptr(0)->get_output_partial_shape(0)[1].get_length();
             int k_size = m_pa->get_input_node_shared_ptr(1)->get_output_partial_shape(0)[1].get_length();
             int v_size = m_pa->get_input_node_shared_ptr(2)->get_output_partial_shape(0)[1].get_length();
@@ -379,8 +382,7 @@ PATensorParallelFusion::PATensorParallelFusion(size_t world_size, size_t world_r
                 find_ops_in_fc_to_pa(vector_visited_fc[j]);
                 for (size_t i = 0; i < vector_visited.size(); i++) {
                     auto cur_node = vector_visited[i];
-                    if (ov::is_type<ov::intel_gpu::op::FullyConnected>(cur_node) ||
-                        ov::is_type<ov::intel_gpu::op::FullyConnectedCompressed>(cur_node)) {
+                    if (ov::is_type<ov::intel_gpu::op::FullyConnected>(cur_node) || ov::is_type<ov::intel_gpu::op::FullyConnectedCompressed>(cur_node)) {
                         std::shared_ptr<ov::Node> new_fc = nullptr;
                         if (vector_visited_fc.size() > 1)
                             new_fc = split_fc(cur_node, op::TP_MODE::ALL_GATHERH, qkv_parts).first;
@@ -436,8 +438,7 @@ PATensorParallelFusion::PATensorParallelFusion(size_t world_size, size_t world_r
                 find_ops_in_pa_to_fc(m_pa);
                 for (size_t i = 0; i < vector_visited.size(); i++) {
                     auto cur_node = vector_visited[i];
-                    if (ov::is_type<ov::intel_gpu::op::FullyConnected>(cur_node) ||
-                        ov::is_type<ov::intel_gpu::op::FullyConnectedCompressed>(cur_node)) {
+                    if (ov::is_type<ov::intel_gpu::op::FullyConnected>(cur_node) || ov::is_type<ov::intel_gpu::op::FullyConnectedCompressed>(cur_node)) {
                         fc_after_pa_sync(cur_node, qkv_parts);
                         continue;
                     }

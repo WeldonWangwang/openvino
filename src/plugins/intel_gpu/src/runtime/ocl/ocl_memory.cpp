@@ -74,12 +74,30 @@ static int get_cl_map_type(mem_lock_type type) {
     }
 }
 
-gpu_buffer::gpu_buffer(ocl_engine* engine,
-                       const layout& layout)
-    : lockable_gpu_mem(), memory(engine, layout, allocation_type::cl_mem, nullptr),
-    _buffer(engine->get_cl_context(), CL_MEM_READ_WRITE | CL_MEM_ALLOW_UNRESTRICTED_SIZE_INTEL, size()) {
-    m_mem_tracker =
-        std::make_shared<MemoryTracker>(engine, _buffer.get(), layout.bytes_count(), allocation_type::cl_mem);
+gpu_buffer::gpu_buffer(ocl_engine* engine, const layout& layout) : lockable_gpu_mem(), memory(engine, layout, allocation_type::cl_mem, nullptr) {
+    //_buffer(engine->get_cl_context(), CL_MEM_READ_WRITE | CL_MEM_ALLOW_UNRESTRICTED_SIZE_INTEL, size())
+    cl_mem_properties_intel extMemProperties[] = {
+        CL_MEM_FLAGS,
+        CL_MEM_READ_WRITE | CL_MEM_ALLOW_UNRESTRICTED_SIZE_INTEL,
+        CL_MEM_DEVICE_ID_INTEL,
+        (cl_mem_properties_intel)engine->get_cl_device().get(),
+        0,
+    };
+    if (!_create_buffer_with_properties_fn) {
+        // Try to load the entrypoint for clCreateBufferWithPropertiesINTEL
+        _create_buffer_with_properties_fn =
+            try_load_entrypoint<clCreateBufferWithPropertiesINTEL_fn>(engine->get_cl_context().get(), "clCreateBufferWithPropertiesINTEL");
+    }
+    if (!_create_buffer_with_properties_fn) {
+        OPENVINO_THROW("Failed to load clCreateBufferWithPropertiesINTEL entrypoint");
+    }
+
+    auto local_mem = _create_buffer_with_properties_fn(engine->get_cl_context().get(), extMemProperties, 0, layout.bytes_count(), NULL, NULL);
+    _buffer = cl::Buffer(local_mem, true);
+    if (!_buffer()) {
+        OPENVINO_THROW("Failed to create OpenCL buffer with properties");
+    }
+    m_mem_tracker = std::make_shared<MemoryTracker>(engine, _buffer.get(), layout.bytes_count(), allocation_type::cl_mem);
 }
 
 gpu_buffer::gpu_buffer(ocl_engine* engine,

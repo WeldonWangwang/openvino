@@ -502,6 +502,30 @@ struct paged_attention_impl : multi_stage_primitive<paged_attention> {
                                    << "intermediates=" << args.intermediates.size() << " "
                                    << "weights=" << args.weights << " "
                                    << "scalars=" << (args.scalars ? args.scalars->size() : 0) << "\n";
+            stream.finish();
+            // check inputs/outputs memory for kv cache update stage using mem_lock
+            if (instance.id().find("25013") != std::string::npos) {
+                auto test = instance.block_indices_memory_ptr();
+                mem_lock<int32_t, mem_lock_type::read> inputs_lock(test, stream);
+                for (size_t i = 0; i < inputs_lock.size(); i++) {
+                    GPU_DEBUG_TRACE_DETAIL << "Input block index " << i << ": " << inputs_lock[i] << "\n";
+                }
+
+                mem_lock<int32_t, mem_lock_type::read> inputs_lock_2(instance.block_indices_begins_memory_ptr(), stream);
+                for (size_t i = 0; i < inputs_lock_2.size(); i++) {
+                    GPU_DEBUG_TRACE_DETAIL << "Input block begin index " << i << ": " << inputs_lock_2[i] << "\n";
+                }
+
+                mem_lock<int32_t, mem_lock_type::read> inputs_lock_3(instance.past_lens_memory_ptr(), stream);
+                for (size_t i = 0; i < inputs_lock_3.size(); i++) {
+                    GPU_DEBUG_TRACE_DETAIL << "past length  " << i << ": " << inputs_lock_3[i] << "\n";
+                }
+
+                mem_lock<int32_t, mem_lock_type::read> inputs_lock_4(instance.subsequence_begins_memory_ptr(), stream);
+                for (size_t i = 0; i < inputs_lock_4.size(); i++) {
+                    GPU_DEBUG_TRACE_DETAIL << "subseq begin " << i << ": " << inputs_lock_4[i] << "\n";
+                }
+            }
 
             stream.set_arguments(*_kernels[idx_final], _kernels_data[stage].kernels[kd_idx].params, args);
 

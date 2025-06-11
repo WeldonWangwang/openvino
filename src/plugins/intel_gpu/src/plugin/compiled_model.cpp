@@ -17,8 +17,10 @@
 #include "openvino/runtime/threading/cpu_message.hpp"
 #include "openvino/pass/constant_folding.hpp"
 #include "openvino/pass/manager.hpp"
+#include "openvino/core/graph_util.hpp"
 #include "plugin/transformations/pa_tensor_parallel.hpp"
 #include "plugin/transformations/fc_all_reduce.hpp"
+#include "plugin/transformations/we_tensor_parallel.hpp"
 #include "plugin/transformations/mlp_tensor_parallel.hpp"
 #include "plugin/transformations/remaining_fc_parallel.hpp"
 #include <sys/types.h>
@@ -152,6 +154,7 @@ CompiledModel::CompiledModel(std::shared_ptr<ov::Model> model,
                     if (getenv("OV_ENABLE_LAST_FC"))
                         manager.register_pass<ov::intel_gpu::RemainFCParallelFusion>(config.get_context_for_tp().size(), i);
                     manager.run_passes(model_clone);
+                    //ov::serialize(model_clone, "model_tp_" + std::to_string(i) + ".xml");
                 }
                 m_sub_compiled_models.push_back(std::make_shared<CompiledModel>(
                     model_clone, plugin, m_config.get_context_for_tp()[i].as<RemoteContextImpl::Ptr>(), configs_for_tp[i], m_sub_memory_manager));

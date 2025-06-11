@@ -38,7 +38,7 @@ TEST(TransformationTestsF1, FullyConnectedSplitInput11) {
     {
         // -------- Construct model
         unsigned long test_size = 2;
-        auto input1 = std::make_shared<ov::op::v0::Parameter>(ov::element::f32, ov::Shape{1, 1, test_size, test_size});
+        auto input1 = std::make_shared<ov::op::v0::Parameter>(ov::element::f32, ov::PartialShape{-1, 1, 2, 2});
         std::vector<float> weights(test_size * test_size, 2);
         auto input2 = ov::op::v0::Constant::create(ov::element::f32, ov::Shape{test_size, test_size}, {5, 6, 7, 8});
         std::cout << "\n" << "weights: ";
@@ -63,8 +63,9 @@ TEST(TransformationTestsF1, FullyConnectedSplitInput11) {
 
         // -------- Prepare input --------
         std::vector<float> input_data = {1, 2, 3, 4};
+        ov::Shape input_shape = {1, 1, 2, 2};
         auto tensor = ov::Tensor(infer_request.get_input_tensor().get_element_type(),
-                                 infer_request.get_input_tensor().get_shape(),
+                                 input_shape,
                                  input_data.data());
         // auto input_generate = ov::test::utils::InputGenerateData(0, 5);
         // auto tensor = ov::test::utils::create_and_fill_tensor(infer_request.get_input_tensor().get_element_type(),
