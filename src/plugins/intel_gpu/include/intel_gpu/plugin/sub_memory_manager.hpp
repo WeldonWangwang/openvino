@@ -27,8 +27,6 @@ public:
         std::shared_ptr<cldnn::stream> stream_ptr;
         std::vector<cldnn::memory::ptr> recv_bufs;
         std::vector<void*> remote_mems;
-        std::vector<bool> recv_flag;
-        std::vector<cldnn::event::ptr> events;
         cldnn::memory::ptr output;
         cldnn::layout layout;
     };
@@ -44,18 +42,13 @@ public:
         memory_info.layout = cldnn::layout();
         memory_info.recv_bufs.assign(_num_sub_streams, nullptr);
         memory_info.remote_mems.assign(_num_sub_streams, nullptr);
-        memory_info.recv_flag.assign(_num_sub_streams, false);
-        memory_info.events.assign(_num_sub_streams, nullptr);
         std::vector<MemoryInfo> memorys;
         memorys.assign(_num_sub_streams, memory_info);
         _memorys_table.assign(2, memorys);
         _use_count.assign(2, 0);
         result = nullptr;
         updated_flag = false;
-        step1_copy_done.store(0);
-        step2_add_done.store(0);
-        step3_concat_copy_done.store(0);
-        step4_concat_copy_done.store(0);
+        create_pipeline_done.store(false);
     }
 
     int get_memory_id(int sub_stream_id) {
@@ -78,20 +71,9 @@ public:
     void* result;
     bool updated_flag;
     std::mutex _flagMutex;
-    std::atomic<int> step1_copy_done;
-    std::atomic<int> step2_add_done;
-    std::atomic<int> step3_concat_copy_done;
-    std::atomic<int> step4_concat_copy_done;
-    cl_event user_events[2];
-    cl_event step1_copy_events[2];
-    cl_event step2_add_events[2];
-    cl_event step3_gather_copy_events[2];
-    cl_event step4_gather_copy_events[2];
-
-    cldnn::event::ptr step1_copy_events_ptr[2];
-    cldnn::event::ptr step2_add_events_ptr[2];
-    cldnn::event::ptr step3_gather_copy_events_ptr[2];
-    cldnn::event::ptr step4_gather_copy_events_ptr[2];
+    std::atomic<bool> create_pipeline_done;
+    cl_command_queue rank_1_queue;
+    cldnn::stream* rank_1_stream;
 };
 }  // namespace intel_gpu
 }  // namespace ov
