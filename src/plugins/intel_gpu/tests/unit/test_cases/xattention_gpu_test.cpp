@@ -11,12 +11,12 @@
 #include <intel_gpu/primitives/permute.hpp>
 #include <intel_gpu/primitives/reorder.hpp>
 #include <intel_gpu/primitives/softmax.hpp>
+
 #include "openvino/reference/divide.hpp"
 #include "openvino/reference/matmul.hpp"
 #include "openvino/reference/softmax.hpp"
 #include "openvino/reference/transpose.hpp"
 #include "openvino/runtime/tensor.hpp"
-
 #include "random_generator.hpp"
 #include "test_utils.h"
 
@@ -58,19 +58,18 @@ using namespace ::tests;
 * shape: [max_num_batched_tokens / BLOCK_SIZE, head_size]​ || [max_num_batched_tokens, head_size], type: f16
 */
 
-
-enum class ScoresMode {
+enum class XAttentionScoresMode {
     DISABLED = 0,
     LAST_TOKEN,
     SNAPKV
 };
 
-struct SubsequenceDescriptor {
+struct XAttentionSubsequenceDescriptor {
     int num_tokens;
     int past_len;
 };
 
-struct CacheRotationDescriptor {
+struct XAttentionCacheRotationDescriptor {
     bool apply_rotation;
     // configures 2nd dimension of rotation_deltas
     // if per_block is true, single value is used for all tokens inside the block
@@ -78,7 +77,7 @@ struct CacheRotationDescriptor {
     bool per_block;
 };
 
-struct PagedAttentionManager {
+struct XAttentionManager {
     int num_heads;
     int k_head_size;
     int v_head_size;
@@ -87,8 +86,8 @@ struct PagedAttentionManager {
     bool kv_cache_compression;
     ov::internal::CacheQuantMode key_cache_quant_mode;
     bool has_score_aggregation;
-    CacheRotationDescriptor rotation_config;
-    std::vector<SubsequenceDescriptor> subsequence_descs;
+    XAttentionCacheRotationDescriptor rotation_config;
+    std::vector<XAttentionSubsequenceDescriptor> subsequence_descs;
 
     // per-subsequence QKV inputs
     std::vector<std::vector<ov::float16>> query_data; // {[1, num_tokens, num_heads, k_head_size], ..}
@@ -115,14 +114,16 @@ struct PagedAttentionManager {
     std::vector<int> xattention_block_size;
     std::vector<int> xattention_stride;
 
+    std::vector<ov::float16> sinks;
+
     cldnn::engine& test_engine;
     cldnn::stream& test_stream;
     tests::random_generator& rg;
 
-    PagedAttentionManager(tests::random_generator& rg,
+    XAttentionManager(tests::random_generator& rg,
                           cldnn::engine& engine,
                           cldnn::stream& stream,
-                          const std::vector<SubsequenceDescriptor>& subsequence_descs,
+                          const std::vector<XAttentionSubsequenceDescriptor>& subsequence_descs,
                           int num_heads,
                           int k_head_size,
                           int v_head_size,
@@ -131,7 +132,7 @@ struct PagedAttentionManager {
                           bool kv_cache_compression,
                           ov::internal::CacheQuantMode key_cache_quant_mode,
                           bool has_score_aggregation,
-                          CacheRotationDescriptor rotation_config)
+                          XAttentionCacheRotationDescriptor rotation_config)
         : num_heads(num_heads)
         , k_head_size(k_head_size)
         , v_head_size(v_head_size)
@@ -427,6 +428,20 @@ struct PagedAttentionManager {
         return get_memory_from_vec(xattention_stride);
     }
 
+    memory::ptr get_sinks_memory() {
+        auto mem = get_memory_from_vec(sinks);
+        auto layout = mem->get_layout();
+        layout.set_partial_shape(ov::PartialShape{ 1, num_heads, 1, 1 });
+
+        if (sinks.empty()) {
+            auto empty_layout = mem->get_layout();
+            empty_layout.set_partial_shape(ov::PartialShape{ 0, 0, 0, 0 });
+            return test_engine.reinterpret_buffer(*mem, empty_layout);
+        }
+
+        return test_engine.reinterpret_buffer(*mem, layout);
+    }
+
     float get_default_scale() {
         return static_cast<float>(1.f / std::sqrt(k_head_size));
     }
@@ -562,8 +577,7 @@ private:
 
 using Shape = std::vector<size_t>;
 
-using CMXAttentionBlockIndex =
-    std::pair<size_t, size_t>;  // .first is the *query* dimension block index, .second is *key*
+using CMXAttentionBlockIndex = std::pair<size_t, size_t>;  // .first is the *query* dimension block index, .second is *key*
 using CMXAttentionRetainedBlockIndices = std::set<CMXAttentionBlockIndex>;
 using CMXAttentionRetainedBlockIndicesForAllHeads = std::vector<CMXAttentionRetainedBlockIndices>;
 
@@ -574,11 +588,7 @@ public:
         OPENVINO_ASSERT(m_block_size % m_stride == 0);
     }
 
-    void diagonal_reshape(const T* input_data,
-                            const Shape& input_shape,
-                            T* output_data,
-                            const Shape& output_shape,
-                            bool is_antidiagonal) {
+    void diagonal_reshape(const T* input_data, const Shape& input_shape, T* output_data, const Shape& output_shape, bool is_antidiagonal) {
         OPENVINO_ASSERT(input_shape.size() == 3);
         OPENVINO_ASSERT(output_shape.size() == 3);
         size_t H = input_shape[0];
@@ -668,10 +678,8 @@ public:
         }
     }
 
-    CMXAttentionRetainedBlockIndicesForAllHeads get_block_indices_to_keep(T* blocked_attention_scores_data,
-                                                                        const Shape& blocked_attention_scores_shape) {
-        OPENVINO_ASSERT(blocked_attention_scores_shape.size() == 3,
-                        "Expected shape [num_heads, q_block_num, k_block_num]");
+    CMXAttentionRetainedBlockIndicesForAllHeads get_block_indices_to_keep(T* blocked_attention_scores_data, const Shape& blocked_attention_scores_shape) {
+        OPENVINO_ASSERT(blocked_attention_scores_shape.size() == 3, "Expected shape [num_heads, q_block_num, k_block_num]");
 
         size_t num_heads = blocked_attention_scores_shape[0];
         size_t q_block_num = blocked_attention_scores_shape[1];
@@ -679,9 +687,7 @@ public:
 
         CMXAttentionRetainedBlockIndicesForAllHeads retval(num_heads);
 
-        std::vector<std::vector<std::vector<bool>>> mask(
-            num_heads,
-            std::vector<std::vector<bool>>(q_block_num, std::vector<bool>(k_block_num, false)));
+        std::vector<std::vector<std::vector<bool>>> mask(num_heads, std::vector<std::vector<bool>>(q_block_num, std::vector<bool>(k_block_num, false)));
 
         for (size_t head_idx = 0; head_idx < num_heads; head_idx++) {
             for (size_t q_block_idx = 0; q_block_idx < q_block_num; q_block_idx++) {
@@ -782,10 +788,10 @@ public:
     }
 
     CMXAttentionRetainedBlockIndicesForAllHeads select_blocks(const T* query_data,
-                                                            const Shape& query_shape,
-                                                            const T* key_data,
-                                                            const Shape& key_shape,
-                                                            int chunk_size = -1) {
+                                                              const Shape& query_shape,
+                                                              const T* key_data,
+                                                              const Shape& key_shape,
+                                                              int chunk_size = -1) {
         OPENVINO_ASSERT(query_shape.size() == 3 && key_shape.size() == 3);
         OPENVINO_ASSERT(query_shape[0] == key_shape[0] && query_shape[2] == key_shape[2]);
         OPENVINO_ASSERT(query_shape[1] % m_stride == 0 && key_shape[1] % m_stride == 0);
@@ -795,7 +801,8 @@ public:
         const size_t q_len = query_shape[1];
         const size_t k_len = key_shape[1];
         const size_t head_dim = query_shape[2];
-        if (chunk_size == -1) chunk_size = q_len;
+        if (chunk_size == -1)
+            chunk_size = q_len;
 
         auto pad_seq = [&](const T* src_data, size_t seq_len) {
             size_t num_to_pad = ((seq_len + chunk_size - 1) / chunk_size) * chunk_size - seq_len;
@@ -807,8 +814,7 @@ public:
                 size_t dst_off = h * (seq_len + num_to_pad) * head_dim;
                 std::memcpy(buf.get() + dst_off, src_data + src_off, seq_len * head_dim * sizeof(T));
                 if (num_to_pad)
-                    std::fill(buf.get() + dst_off + seq_len * head_dim,
-                            buf.get() + dst_off + (seq_len + num_to_pad) * head_dim, T(0));
+                    std::fill(buf.get() + dst_off + seq_len * head_dim, buf.get() + dst_off + (seq_len + num_to_pad) * head_dim, T(0));
             }
             return std::make_pair(std::move(buf), pad_shape);
         };
@@ -850,8 +856,7 @@ public:
 
         for (size_t h = 0; h < num_heads; ++h) {
             for (size_t q = 0; q < reshaped_chunk_size; ++q) {
-                size_t base = h * reshaped_chunk_size * (reshaped_chunk_size * k_chunk_num)
-                            + q * (reshaped_chunk_size * k_chunk_num);
+                size_t base = h * reshaped_chunk_size * (reshaped_chunk_size * k_chunk_num) + q * (reshaped_chunk_size * k_chunk_num);
 
                 for (size_t k = k_reshaped_seq_len - k_reshaped_num_to_pad; k < k_reshaped_seq_len; ++k)
                     causal_mask_buf.get()[base + k] = neg_inf;
@@ -873,9 +878,7 @@ public:
 
         // ======== block sum + select ========
         const size_t blocks_per_axis = m_block_size / m_stride;
-        Shape block_sum_shape = {num_heads,
-                                reshaped_q_len / blocks_per_axis,
-                                reshaped_k_len / blocks_per_axis};
+        Shape block_sum_shape = {num_heads, reshaped_q_len / blocks_per_axis, reshaped_k_len / blocks_per_axis};
         auto block_sum_buf = allocate_buf(block_sum_shape);
         block_sum_attention_scores(attn_score_buf.get(), qk_shape, block_sum_buf.get(), block_sum_shape);
         attn_score_buf.reset();
@@ -902,7 +905,7 @@ public:
 };
 
 struct xAttentionReference {
-    xAttentionReference(PagedAttentionManager& pam) : pam(pam), test_engine(pam.test_engine), test_stream(pam.test_stream) {}
+    xAttentionReference(XAttentionManager& pam) : pam(pam), test_engine(pam.test_engine), test_stream(pam.test_stream) {}
 
     std::pair<std::vector<ov::float16>, std::vector<ov::float16>> get_reference() {
         std::vector<ov::float16> ref_data_output;
@@ -1042,7 +1045,7 @@ private:
             CMXAttentionBlockSelector<float> selector(threshold, block_size, stride);
             retained_blocks = selector.select_blocks(query_padded_f32.data(), query_shape_padded, key_padded_f32.data(), key_shape_padded);
         }
-        auto mask_mem = get_mask_mem_combined_multi_head(num_queries, num_keys, num_heads, sliding_window_size, retained_blocks, block_size);
+        auto mask_mem = get_mask_mem_combined_multi_head(num_queries, num_keys, num_heads, sliding_window_size, retained_blocks, static_cast<int>(block_size));
 
         topology topology;
         topology.add(input_layout("query", query_layout),
@@ -1227,7 +1230,7 @@ private:
         }
     }
 
-    PagedAttentionManager& pam;
+    XAttentionManager& pam;
     cldnn::engine& test_engine;
     cldnn::stream& test_stream;
 };
@@ -1244,7 +1247,7 @@ public:
     }
 
     void execute(T& p) {
-        PagedAttentionManager pam(rg,
+        XAttentionManager pam(rg,
                                   get_test_engine(),
                                   get_test_stream(),
                                   p.subsequences,
@@ -1255,7 +1258,7 @@ public:
                                   p.sliding_window_size,
                                   p.kv_cache_compression,
                                   p.key_cache_quant_mode,
-                                  p.scores_mode == ScoresMode::SNAPKV,
+                                  p.scores_mode == XAttentionScoresMode::SNAPKV,
                                   p.rotation_config);
 
         if (p.kv_cache_compression)
@@ -1289,6 +1292,7 @@ public:
         auto xattention_threshold_mem = pam.get_xattention_threshold_memory();
         auto xattention_block_size_mem = pam.get_xattention_block_size_memory();
         auto xattention_stride_mem = pam.get_xattention_stride_memory();
+        auto sinks_mem = pam.get_sinks_memory();
 
         auto query_layout = query_mem->get_layout();
         auto key_layout = key_mem->get_layout();
@@ -1310,6 +1314,7 @@ public:
         auto xattention_threshold_layout = xattention_threshold_mem->get_layout();
         auto xattention_block_size_layout = xattention_block_size_mem->get_layout();
         auto xattention_stride_layout = xattention_stride_mem->get_layout();
+        auto sinks_layout = sinks_mem->get_layout();
 
         // make layouts dynamic
         query_layout.set_partial_shape(ov::PartialShape{ -1, p.num_heads * p.k_head_size });
@@ -1379,6 +1384,7 @@ public:
             input_info("xattention_threshold"),
             input_info("xattention_block_size"),
             input_info("xattention_stride"),
+            input_info("sinks"),
         };
 
         auto pa_prim = paged_attention("paged_attention", pa_inputs);
@@ -1389,9 +1395,9 @@ public:
         pa_prim.heads_num = p.num_heads;
         pa_prim.scale_val = pam.get_default_scale();
         pa_prim.has_alibi = false;
-        pa_prim.num_outputs = p.scores_mode == ScoresMode::DISABLED ? 1 : 2;
+        pa_prim.num_outputs = p.scores_mode == XAttentionScoresMode::DISABLED ? 1 : 2;
         pa_prim.has_rotated_blocks = p.rotation_config.apply_rotation;
-        pa_prim.has_score_aggregation = p.scores_mode == ScoresMode::SNAPKV;
+        pa_prim.has_score_aggregation = p.scores_mode == XAttentionScoresMode::SNAPKV;
         pa_prim.sliding_window = p.sliding_window_size;
         pa_prim.is_key_by_channel = (p.key_cache_quant_mode == ov::internal::CacheQuantMode::BY_CHANNEL);
 
@@ -1416,7 +1422,7 @@ public:
             reorder("output_data", input_info("paged_attention", 0), format::bfyx, data_types::f16)
         );
 
-        if (p.scores_mode != ScoresMode::DISABLED) {
+        if (p.scores_mode != XAttentionScoresMode::DISABLED) {
             topology.add(reorder("output_scores", input_info("paged_attention", 1), format::bfyx, data_types::f16));
         }
 
@@ -1431,6 +1437,7 @@ public:
             topology.add(input_layout("xattention_threshold", xattention_threshold_layout));
             topology.add(input_layout("xattention_block_size", xattention_block_size_layout));
             topology.add(input_layout("xattention_stride", xattention_stride_layout));
+            topology.add(input_layout("sinks", sinks_layout));
         }
 
         ExecutionConfig config = get_test_default_config(get_test_engine());
@@ -1460,6 +1467,7 @@ public:
         network->set_input_data("xattention_threshold", xattention_threshold_mem);
         network->set_input_data("xattention_block_size", xattention_block_size_mem);
         network->set_input_data("xattention_stride", xattention_stride_mem);
+        network->set_input_data("sinks", sinks_mem);
 
         auto outputs = network->execute();
 
@@ -1467,7 +1475,7 @@ public:
         cldnn::memory::ptr output_scores_mem = nullptr;
 
         output_data_mem = outputs.at("output_data").get_memory();
-        if (p.scores_mode != ScoresMode::DISABLED) {
+        if (p.scores_mode != XAttentionScoresMode::DISABLED) {
             output_scores_mem = outputs.at("output_scores").get_memory();
         }
         auto ref_data = xAttentionReference(pam).get_reference();
@@ -1502,7 +1510,7 @@ public:
 };
 
 struct xattention_test_params {
-    std::vector<SubsequenceDescriptor> subsequences;
+    std::vector<XAttentionSubsequenceDescriptor> subsequences;
     int num_heads;
     int k_head_size;
     int v_head_size;
@@ -1511,8 +1519,8 @@ struct xattention_test_params {
     bool kv_cache_compression;
     ov::internal::CacheQuantMode key_cache_quant_mode;
     bool dynamic_paddings;
-    ScoresMode scores_mode;
-    CacheRotationDescriptor rotation_config;
+    XAttentionScoresMode scores_mode;
+    XAttentionCacheRotationDescriptor rotation_config;
     bool disable_flashattn_v2;
 };
 
@@ -1525,12 +1533,12 @@ TEST_P(xattention_test, basic) {
 
 const auto ENABLE_CACHE_COMPRESSION = true;
 const auto DISABLE_CACHE_COMPRESSION = false;
-const auto DISABLE_SCORES = ScoresMode::DISABLED;
-const auto ENABLE_SCORES = ScoresMode::LAST_TOKEN;
-const auto ENABLE_SCORES_SNAPKV = ScoresMode::SNAPKV;
-const auto PER_BLOCK_ROTATION = CacheRotationDescriptor{true, true};
-const auto PER_TOKEN_ROTATION = CacheRotationDescriptor{true, false};
-const auto DISABLE_ROTATION = CacheRotationDescriptor{false, false};
+const auto DISABLE_SCORES = XAttentionScoresMode::DISABLED;
+const auto ENABLE_SCORES = XAttentionScoresMode::LAST_TOKEN;
+const auto ENABLE_SCORES_SNAPKV = XAttentionScoresMode::SNAPKV;
+const auto PER_BLOCK_ROTATION = XAttentionCacheRotationDescriptor{true, true};
+const auto PER_TOKEN_ROTATION = XAttentionCacheRotationDescriptor{true, false};
+const auto DISABLE_ROTATION = XAttentionCacheRotationDescriptor{false, false};
 const auto STATIC_INPUT_PAD = false;
 const auto DYNAMIC_INPUT_PAD = true;
 const auto ENABLE_FA_V2 = false;
@@ -1541,15 +1549,15 @@ INSTANTIATE_TEST_SUITE_P(smoke_cm_xattention,
                          ::testing::ValuesIn(std::vector<xattention_test_params>{
     /* without scores output, static input query paddings, single sequence, disable KV cache compression, k_head_size==v_head_size,
     token_size>=32, disable_mix_mode */
-    xattention_test_params{ {{32, 0}},   2, 64, 64, 256, 0, DISABLE_CACHE_COMPRESSION, ov::internal::CacheQuantMode::BY_TOKEN, STATIC_INPUT_PAD, DISABLE_SCORES, DISABLE_ROTATION, ENABLE_FA_V2 }, // 1st token
-    xattention_test_params{ {{4096, 0}},   2, 64, 64, 256, 0, DISABLE_CACHE_COMPRESSION, ov::internal::CacheQuantMode::BY_TOKEN, STATIC_INPUT_PAD, DISABLE_SCORES, DISABLE_ROTATION, ENABLE_FA_V2 }, // 1st token
+    xattention_test_params{ {{32, 0}},   2, 16, 16, 256, 0, DISABLE_CACHE_COMPRESSION, ov::internal::CacheQuantMode::BY_TOKEN, STATIC_INPUT_PAD, DISABLE_SCORES, DISABLE_ROTATION, ENABLE_FA_V2 }, // 1st token
+    xattention_test_params{ {{4096, 0}},   2, 16, 16, 256, 0, DISABLE_CACHE_COMPRESSION, ov::internal::CacheQuantMode::BY_TOKEN, STATIC_INPUT_PAD, DISABLE_SCORES, DISABLE_ROTATION, ENABLE_FA_V2 }, // 1st token
 
-    xattention_test_params{ {{1, 31}},   2, 64, 64, 256, 0, DISABLE_CACHE_COMPRESSION, ov::internal::CacheQuantMode::BY_TOKEN, STATIC_INPUT_PAD, DISABLE_SCORES, DISABLE_ROTATION, DISABLE_FA_V2 }, // 2nd token
-    xattention_test_params{ {{1, 32}},   2, 64, 64, 256, 0, DISABLE_CACHE_COMPRESSION, ov::internal::CacheQuantMode::BY_TOKEN, STATIC_INPUT_PAD, DISABLE_SCORES, DISABLE_ROTATION, DISABLE_FA_V2 }, // 2nd token
-    xattention_test_params{ {{1, 1023}}, 2, 64, 64, 256, 0, DISABLE_CACHE_COMPRESSION, ov::internal::CacheQuantMode::BY_TOKEN, STATIC_INPUT_PAD, DISABLE_SCORES, DISABLE_ROTATION, DISABLE_FA_V2 }, // 2nd token
-    xattention_test_params{ {{1, 1024}}, 2, 64, 64, 256, 0, DISABLE_CACHE_COMPRESSION, ov::internal::CacheQuantMode::BY_TOKEN, STATIC_INPUT_PAD, DISABLE_SCORES, DISABLE_ROTATION, DISABLE_FA_V2 }, // 2nd token
-    xattention_test_params{ {{1, 127}},  2, 64, 64, 256, 0, DISABLE_CACHE_COMPRESSION, ov::internal::CacheQuantMode::BY_TOKEN, STATIC_INPUT_PAD, DISABLE_SCORES, DISABLE_ROTATION, DISABLE_FA_V2 }, // 2nd token
-    xattention_test_params{ {{1, 128}},  2, 64, 64, 256, 0, DISABLE_CACHE_COMPRESSION, ov::internal::CacheQuantMode::BY_TOKEN, STATIC_INPUT_PAD, DISABLE_SCORES, DISABLE_ROTATION, DISABLE_FA_V2 }, // 2nd token
-    xattention_test_params{ {{1, 129}},  2, 64, 64, 256, 0, DISABLE_CACHE_COMPRESSION, ov::internal::CacheQuantMode::BY_TOKEN, STATIC_INPUT_PAD, DISABLE_SCORES, DISABLE_ROTATION, DISABLE_FA_V2 }, // 2nd token
-    xattention_test_params{ {{1, 32}},  28, 128, 128, 256, 0, DISABLE_CACHE_COMPRESSION, ov::internal::CacheQuantMode::BY_TOKEN, STATIC_INPUT_PAD, DISABLE_SCORES, DISABLE_ROTATION, DISABLE_FA_V2 }, // 2nd token
+    xattention_test_params{ {{1, 31}},   2, 16, 16, 256, 0, DISABLE_CACHE_COMPRESSION, ov::internal::CacheQuantMode::BY_TOKEN, STATIC_INPUT_PAD, DISABLE_SCORES, DISABLE_ROTATION, DISABLE_FA_V2 }, // 2nd token
+    xattention_test_params{ {{1, 32}},   2, 16, 16, 256, 0, DISABLE_CACHE_COMPRESSION, ov::internal::CacheQuantMode::BY_TOKEN, STATIC_INPUT_PAD, DISABLE_SCORES, DISABLE_ROTATION, DISABLE_FA_V2 }, // 2nd token
+    xattention_test_params{ {{1, 1023}}, 2, 16, 16, 256, 0, DISABLE_CACHE_COMPRESSION, ov::internal::CacheQuantMode::BY_TOKEN, STATIC_INPUT_PAD, DISABLE_SCORES, DISABLE_ROTATION, DISABLE_FA_V2 }, // 2nd token
+    xattention_test_params{ {{1, 1024}}, 2, 16, 16, 256, 0, DISABLE_CACHE_COMPRESSION, ov::internal::CacheQuantMode::BY_TOKEN, STATIC_INPUT_PAD, DISABLE_SCORES, DISABLE_ROTATION, DISABLE_FA_V2 }, // 2nd token
+    xattention_test_params{ {{1, 127}},  2, 16, 16, 256, 0, DISABLE_CACHE_COMPRESSION, ov::internal::CacheQuantMode::BY_TOKEN, STATIC_INPUT_PAD, DISABLE_SCORES, DISABLE_ROTATION, DISABLE_FA_V2 }, // 2nd token
+    xattention_test_params{ {{1, 128}},  2, 16, 16, 256, 0, DISABLE_CACHE_COMPRESSION, ov::internal::CacheQuantMode::BY_TOKEN, STATIC_INPUT_PAD, DISABLE_SCORES, DISABLE_ROTATION, DISABLE_FA_V2 }, // 2nd token
+    xattention_test_params{ {{1, 129}},  2, 16, 16, 256, 0, DISABLE_CACHE_COMPRESSION, ov::internal::CacheQuantMode::BY_TOKEN, STATIC_INPUT_PAD, DISABLE_SCORES, DISABLE_ROTATION, DISABLE_FA_V2 }, // 2nd token
+    xattention_test_params{ {{1, 32}},  28, 16, 16, 256, 0, DISABLE_CACHE_COMPRESSION, ov::internal::CacheQuantMode::BY_TOKEN, STATIC_INPUT_PAD, DISABLE_SCORES, DISABLE_ROTATION, DISABLE_FA_V2 }, // 2nd token
 }));
