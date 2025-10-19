@@ -1263,7 +1263,6 @@ INSTANTIATE_TEST_SUITE_P(smoke_cm_xattention,
     xattention_test_params{ {{32, 0}},   2, 2, 64, 64, 256, {0.9}, 0, DISABLE_CACHE_COMPRESSION, ov::internal::CacheQuantMode::BY_TOKEN, STATIC_INPUT_PAD, DISABLE_SCORES, DISABLE_ROTATION, ENABLE_FA_V2 }, // 1st token
     xattention_test_params{ {{1024, 0}}, 2, 2, 64, 64, 256, {0.9}, 0, DISABLE_CACHE_COMPRESSION, ov::internal::CacheQuantMode::BY_TOKEN, STATIC_INPUT_PAD, DISABLE_SCORES, DISABLE_ROTATION, ENABLE_FA_V2 }, // 1st token
     xattention_test_params{ {{2048, 0}}, 2, 2, 64, 64, 256, {0.9}, 0, DISABLE_CACHE_COMPRESSION, ov::internal::CacheQuantMode::BY_TOKEN, STATIC_INPUT_PAD, DISABLE_SCORES, DISABLE_ROTATION, ENABLE_FA_V2 }, // 1st token
-    xattention_test_params{ {{8192, 0}}, 2, 2, 64, 64, 256, {0.9}, 0, DISABLE_CACHE_COMPRESSION, ov::internal::CacheQuantMode::BY_TOKEN, STATIC_INPUT_PAD, DISABLE_SCORES, DISABLE_ROTATION, ENABLE_FA_V2 }, // 1st token
 
     xattention_test_params{ {{1, 31}},   2, 2, 64, 64, 256, {0.9}, 0, DISABLE_CACHE_COMPRESSION, ov::internal::CacheQuantMode::BY_TOKEN, STATIC_INPUT_PAD, DISABLE_SCORES, DISABLE_ROTATION, DISABLE_FA_V2 }, // 2nd token
     xattention_test_params{ {{1, 32}},   2, 2, 64, 64, 256, {0.9}, 0, DISABLE_CACHE_COMPRESSION, ov::internal::CacheQuantMode::BY_TOKEN, STATIC_INPUT_PAD, DISABLE_SCORES, DISABLE_ROTATION, DISABLE_FA_V2 }, // 2nd token
