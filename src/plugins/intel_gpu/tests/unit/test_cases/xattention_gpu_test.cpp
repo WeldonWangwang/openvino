@@ -423,8 +423,8 @@ private:
         for (const auto& subsequence_desc : subsequence_descs)
             total_tokens += subsequence_desc.num_tokens;
 
-        auto query_shape = ov::PartialShape{ total_tokens, num_heads * head_size };
-        auto query_layout = layout{ query_shape, data_types::f16, format::bfyx };
+        auto query_shape = ov::PartialShape{total_tokens, num_heads * head_size};
+        auto query_layout = layout{query_shape, data_types::f16, format::bfyx};
         auto memory = test_engine.allocate_memory(query_layout);
 
         for (int subsequence_idx = 0; subsequence_idx < static_cast<int>(subsequence_descs.size()); subsequence_idx++) {
@@ -435,13 +435,10 @@ private:
                     if (skip_past_len)
                         input_token_offset += subsequence_descs[subsequence_idx].past_len;
 
-                    ov::float16* data_ptr = input_data[subsequence_idx].data() +
-                                            input_token_offset * num_heads * head_size +
-                                            head_idx * head_size;
+                    ov::float16* data_ptr = input_data[subsequence_idx].data() + input_token_offset * num_heads * head_size + head_idx * head_size;
 
                     size_t output_token_offset = subsequence_begins[subsequence_idx] + token_idx;
-                    size_t output_offset = output_token_offset * num_heads * head_size +
-                                           head_idx * head_size;
+                    size_t output_offset = output_token_offset * num_heads * head_size + head_idx * head_size;
 
                     set_values(test_stream, memory, data_ptr, head_size, output_offset);
                 }
@@ -694,45 +691,49 @@ private:
                                                      key_padded.data(),
                                                      {static_cast<size_t>(num_heads), padded_k, static_cast<size_t>(k_head_size)});
         }
-        auto mask_mem = get_mask_mem_combined_multi_head(num_queries, num_keys, num_heads, num_kv_heads, sliding_window_size, retained_blocks, static_cast<int>(block_size));
+        auto mask_mem = get_mask_mem_combined_multi_head(num_queries,
+                                                         num_keys,
+                                                         num_heads,
+                                                         num_kv_heads,
+                                                         sliding_window_size,
+                                                         retained_blocks,
+                                                         static_cast<int>(block_size));
         topology topology;
         if (num_heads == num_kv_heads) {
             topology.add(input_layout("query", query_layout),
-                        input_layout("key", key_layout),
-                        input_layout("value", value_layout),
-                        data("mask", mask_mem),
-                        data("scale", scale_mem),
-                        permute("query_transposed", input_info("query"), {0, 2, 1, 3}),
-                        permute("key_transposed", input_info("key"), {0, 2, 3, 1}),
-                        permute("value_transposed", input_info("value"), {0, 2, 1, 3}),
-                        gemm("qk_gemm", { input_info("query_transposed"), input_info("key_transposed") }, data_types::f16, false, false),
-                        eltwise("scale_div", { input_info("qk_gemm"), input_info("scale") }, eltwise_mode::prod),
-                        eltwise("eltwise", { input_info("scale_div"), input_info("mask") }, eltwise_mode::sum),
-                        softmax("softmax", input_info("eltwise"), -1),
-                        gemm("qkv_gemm", { input_info("softmax"), input_info("value_transposed") }, data_types::f16, false, false),
-                        permute("qkv_gemm_transposed", input_info("qkv_gemm"), {0, 2, 1, 3}),
-                        reorder("output_data", input_info("qkv_gemm_transposed"), format::bfyx, data_types::f16),
-                        reorder("scores_data", input_info("softmax"), format::bfyx, data_types::f16)
-            );
+                         input_layout("key", key_layout),
+                         input_layout("value", value_layout),
+                         data("mask", mask_mem),
+                         data("scale", scale_mem),
+                         permute("query_transposed", input_info("query"), {0, 2, 1, 3}),
+                         permute("key_transposed", input_info("key"), {0, 2, 3, 1}),
+                         permute("value_transposed", input_info("value"), {0, 2, 1, 3}),
+                         gemm("qk_gemm", {input_info("query_transposed"), input_info("key_transposed")}, data_types::f16, false, false),
+                         eltwise("scale_div", {input_info("qk_gemm"), input_info("scale")}, eltwise_mode::prod),
+                         eltwise("eltwise", {input_info("scale_div"), input_info("mask")}, eltwise_mode::sum),
+                         softmax("softmax", input_info("eltwise"), -1),
+                         gemm("qkv_gemm", {input_info("softmax"), input_info("value_transposed")}, data_types::f16, false, false),
+                         permute("qkv_gemm_transposed", input_info("qkv_gemm"), {0, 2, 1, 3}),
+                         reorder("output_data", input_info("qkv_gemm_transposed"), format::bfyx, data_types::f16),
+                         reorder("scores_data", input_info("softmax"), format::bfyx, data_types::f16));
         } else {
             topology.add(input_layout("query", query_layout),
-                        input_layout("key", key_layout),
-                        input_layout("value", value_layout),
-                        data("mask", mask_mem),
-                        data("scale", scale_mem),
-                        permute("query_transposed", input_info("query"), {1, 2, 0, 3}),
-                        permute("key_transposed", input_info("key"), {1, 2, 3, 0}),
-                        permute("value_transposed", input_info("value"), {1, 2, 0, 3}),
-                        gemm("qk_gemm", { input_info("query_transposed"), input_info("key_transposed") }, data_types::f16, false, false),
-                        eltwise("scale_div", { input_info("qk_gemm"), input_info("scale") }, eltwise_mode::prod),
-                        eltwise("eltwise", { input_info("scale_div"), input_info("mask") }, eltwise_mode::sum),
-                        softmax("softmax", input_info("eltwise"), -1),
-                        gemm("qkv_gemm", { input_info("softmax"), input_info("value_transposed") }, data_types::f16, false, false),
-                        reshape("qkv_gemm_reshape", input_info("qkv_gemm"), {1, num_heads, v_head_size, num_queries}),
-                        permute("qkv_gemm_transposed", input_info("qkv_gemm_reshape"), {0, 2, 1, 3}),
-                        reorder("output_data", input_info("qkv_gemm_transposed"), format::bfyx, data_types::f16),
-                        reorder("scores_data", input_info("softmax"), format::bfyx, data_types::f16)
-            );
+                         input_layout("key", key_layout),
+                         input_layout("value", value_layout),
+                         data("mask", mask_mem),
+                         data("scale", scale_mem),
+                         permute("query_transposed", input_info("query"), {1, 2, 0, 3}),
+                         permute("key_transposed", input_info("key"), {1, 2, 3, 0}),
+                         permute("value_transposed", input_info("value"), {1, 2, 0, 3}),
+                         gemm("qk_gemm", {input_info("query_transposed"), input_info("key_transposed")}, data_types::f16, false, false),
+                         eltwise("scale_div", {input_info("qk_gemm"), input_info("scale")}, eltwise_mode::prod),
+                         eltwise("eltwise", {input_info("scale_div"), input_info("mask")}, eltwise_mode::sum),
+                         softmax("softmax", input_info("eltwise"), -1),
+                         gemm("qkv_gemm", {input_info("softmax"), input_info("value_transposed")}, data_types::f16, false, false),
+                         reshape("qkv_gemm_reshape", input_info("qkv_gemm"), {1, num_heads, v_head_size, num_queries}),
+                         permute("qkv_gemm_transposed", input_info("qkv_gemm_reshape"), {0, 2, 1, 3}),
+                         reorder("output_data", input_info("qkv_gemm_transposed"), format::bfyx, data_types::f16),
+                         reorder("scores_data", input_info("softmax"), format::bfyx, data_types::f16));
         }
 
         ExecutionConfig config = get_test_default_config(test_engine);
@@ -935,20 +936,20 @@ public:
 
     void execute(T& p) {
         XAttentionManager xam(rg,
-                                  get_test_engine(),
-                                  get_test_stream(),
-                                  p.subsequences,
-                                  p.num_heads,
-                                  p.num_kv_heads,
-                                  p.k_head_size,
-                                  p.v_head_size,
-                                  p.block_size,
-                                  p.sliding_window_size,
-                                  p.kv_cache_compression,
-                                  p.key_cache_quant_mode,
-                                  p.scores_mode == XAttentionScoresMode::SNAPKV,
-                                  p.rotation_config,
-                                p.threshold);
+                              get_test_engine(),
+                              get_test_stream(),
+                              p.subsequences,
+                              p.num_heads,
+                              p.num_kv_heads,
+                              p.k_head_size,
+                              p.v_head_size,
+                              p.block_size,
+                              p.sliding_window_size,
+                              p.kv_cache_compression,
+                              p.key_cache_quant_mode,
+                              p.scores_mode == XAttentionScoresMode::SNAPKV,
+                              p.rotation_config,
+                              p.threshold);
 
         if (p.kv_cache_compression)
             tolerance = 25e-3;
@@ -1006,9 +1007,9 @@ public:
         auto sinks_layout = sinks_mem->get_layout();
 
         // make layouts dynamic
-        query_layout.set_partial_shape(ov::PartialShape{ -1, p.num_heads * p.k_head_size });
-        key_layout.set_partial_shape(ov::PartialShape{ -1, p.num_kv_heads * p.k_head_size });
-        value_layout.set_partial_shape(ov::PartialShape{ -1, p.num_kv_heads * p.v_head_size });
+        query_layout.set_partial_shape(ov::PartialShape{-1, p.num_heads * p.k_head_size});
+        key_layout.set_partial_shape(ov::PartialShape{-1, p.num_kv_heads * p.k_head_size});
+        value_layout.set_partial_shape(ov::PartialShape{-1, p.num_kv_heads * p.v_head_size});
         {
             auto pshape = key_cache_layout.get_partial_shape();
             pshape[0] = -1;
@@ -1019,15 +1020,15 @@ public:
             pshape[0] = -1;
             value_cache_layout.set_partial_shape(pshape);
         }
-        past_lens_layout.set_partial_shape(ov::PartialShape{ -1 });
-        subsequence_begins_layout.set_partial_shape(ov::PartialShape{ -1 });
-        block_indices_layout.set_partial_shape(ov::PartialShape{ -1 });
-        block_indices_begins_layout.set_partial_shape(ov::PartialShape{ -1 });
-        score_aggregation_window_layout.set_partial_shape(ov::PartialShape{ -1 });
-        rotated_block_indices_layout.set_partial_shape(ov::PartialShape{ -1 });
-        rotation_deltas_layout.set_partial_shape(ov::PartialShape{ -1, -1 });
-        rotation_trig_lut_layout.set_partial_shape(ov::PartialShape{ -1, p.k_head_size });
-        xattention_threshold_layout.set_partial_shape(ov::PartialShape{ -1 });
+        past_lens_layout.set_partial_shape(ov::PartialShape{-1});
+        subsequence_begins_layout.set_partial_shape(ov::PartialShape{-1});
+        block_indices_layout.set_partial_shape(ov::PartialShape{-1});
+        block_indices_begins_layout.set_partial_shape(ov::PartialShape{-1});
+        score_aggregation_window_layout.set_partial_shape(ov::PartialShape{-1});
+        rotated_block_indices_layout.set_partial_shape(ov::PartialShape{-1});
+        rotation_deltas_layout.set_partial_shape(ov::PartialShape{-1, -1});
+        rotation_trig_lut_layout.set_partial_shape(ov::PartialShape{-1, p.k_head_size});
+        xattention_threshold_layout.set_partial_shape(ov::PartialShape{-1});
 
         if (p.dynamic_paddings) {
             const auto padding_axis = 1;
@@ -1049,8 +1050,7 @@ public:
             auto query_data_shape = query_data_layout.get_shape();
             for (size_t b = 0; b < query_data_shape[0]; b++) {
                 for (size_t f = 0; f < query_data_shape[1]; f++) {
-                    auto input_offset =
-                        query_data_layout.get_linear_offset(cldnn::tensor(static_cast<int32_t>(b), static_cast<int32_t>(f), 0, 0, 0, 0));
+                    auto input_offset = query_data_layout.get_linear_offset(cldnn::tensor(static_cast<int32_t>(b), static_cast<int32_t>(f), 0, 0, 0, 0));
                     auto output_offset =
                         padded_query_data_layout.get_linear_offset(cldnn::tensor(static_cast<int32_t>(b), static_cast<int32_t>(f), 0, 0, 0, 0));
 
@@ -1100,24 +1100,22 @@ public:
         pa_prim.has_xattention = true;
         topology topology;
 
-        topology.add(
-            input_layout("query", query_layout),
-            input_layout("key", key_layout),
-            input_layout("value", value_layout),
-            input_layout("key_cache", key_cache_layout),
-            input_layout("value_cache", value_cache_layout),
-            input_layout("past_lens", past_lens_layout),
-            input_layout("subsequence_begins", subsequence_begins_layout),
-            input_layout("block_indices", block_indices_layout),
-            input_layout("block_indices_begins", block_indices_begins_layout),
-            input_layout("scale", scale_layout),
-            input_layout("sliding_window", sliding_window_layout),
-            input_layout("alibi", alibi_layout),
-            input_layout("max_context_len", max_context_len_layout),
-            input_layout("score_aggregation_window", score_aggregation_window_layout),
-            pa_prim,
-            reorder("output_data", input_info("paged_attention", 0), format::bfyx, data_types::f16)
-        );
+        topology.add(input_layout("query", query_layout),
+                     input_layout("key", key_layout),
+                     input_layout("value", value_layout),
+                     input_layout("key_cache", key_cache_layout),
+                     input_layout("value_cache", value_cache_layout),
+                     input_layout("past_lens", past_lens_layout),
+                     input_layout("subsequence_begins", subsequence_begins_layout),
+                     input_layout("block_indices", block_indices_layout),
+                     input_layout("block_indices_begins", block_indices_begins_layout),
+                     input_layout("scale", scale_layout),
+                     input_layout("sliding_window", sliding_window_layout),
+                     input_layout("alibi", alibi_layout),
+                     input_layout("max_context_len", max_context_len_layout),
+                     input_layout("score_aggregation_window", score_aggregation_window_layout),
+                     pa_prim,
+                     reorder("output_data", input_info("paged_attention", 0), format::bfyx, data_types::f16));
 
         if (p.scores_mode != XAttentionScoresMode::DISABLED) {
             topology.add(reorder("output_scores", input_info("paged_attention", 1), format::bfyx, data_types::f16));
