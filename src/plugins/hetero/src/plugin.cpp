@@ -4,6 +4,7 @@
 
 #include "plugin.hpp"
 
+#include <algorithm>
 #include <fstream>
 #include <map>
 #include <memory>
@@ -19,6 +20,7 @@
 #include "openvino/core/rt_info.hpp"
 #include "openvino/op/util/op_types.hpp"
 #include "openvino/runtime/device_id_parser.hpp"
+#include "intel_gpu/runtime/internal_properties.hpp"
 #include "openvino/runtime/intel_gpu/properties.hpp"
 #include "openvino/runtime/internal_properties.hpp"
 #include "openvino/runtime/properties.hpp"
@@ -316,8 +318,18 @@ ov::hetero::Plugin::QueryResult ov::hetero::Plugin::query_model_update(const std
         }
     };
     if (all_same_gpu_type(device_names) && hetero_query_model_by_device) {
-        auto& first_device_config = properties_per_device.at(device_names[0]);
-        res.model = get_core()->get_transformed_model(model, device_names[0], first_device_config);
+        const auto& first_device_name = device_names.front();
+        const auto& first_device_config = properties_per_device.at(first_device_name);
+
+        ov::AnyMap property_request{first_device_config.begin(), first_device_config.end()};
+        property_request[ov::hint::model.name()] = model;
+
+        auto transformed_model =
+            get_core()
+                ->get_property(first_device_name, ov::intel_gpu::internal::transformed_model, property_request)
+                .as<decltype(ov::intel_gpu::internal::transformed_model)::value_type>();
+
+        res.model = std::move(transformed_model);
         res.is_transformed = true;
     } else {
         res.model = model;

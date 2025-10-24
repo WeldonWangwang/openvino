@@ -5,6 +5,7 @@
 #pragma once
 
 #include "intel_gpu/runtime/shape_predictor.hpp"
+#include "openvino/core/model.hpp"
 #include "openvino/runtime/properties.hpp"
 #include "openvino/runtime/intel_gpu/properties.hpp"
 
@@ -168,6 +169,13 @@ static constexpr Property<ShapePredictor::Settings, ov::PropertyMutability::RW> 
 static constexpr Property<std::vector<std::string>, ov::PropertyMutability::RW> load_dump_raw_binary{"GPU_LOAD_DUMP_RAW_BINARY"};
 static constexpr Property<bool, ov::PropertyMutability::RW> could_use_flashattn_v2{"GPU_COULD_USE_FLASHATTN_V2"};
 static constexpr Property<uint64_t, PropertyMutability::RW> dynamic_quantization_group_size_max{"GPU_DYNAMIC_QUANTIZATION_GROUP_SIZE_MAX"};
+
+namespace internal {
+/**
+ * @brief Read-only property to get a transformed ov::Model for provided compilation options.
+ */
+static constexpr Property<std::shared_ptr<ov::Model>, PropertyMutability::RO> transformed_model{"GPU_TRANSFORMED_MODEL"};
+}  // namespace internal
 }  // namespace ov::intel_gpu
 
 namespace cldnn {
