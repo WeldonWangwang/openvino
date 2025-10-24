@@ -20,6 +20,7 @@
 #include "openvino/core/rt_info.hpp"
 #include "openvino/op/util/op_types.hpp"
 #include "openvino/runtime/device_id_parser.hpp"
+#include "intel_gpu/runtime/internal_properties.hpp"
 #include "openvino/runtime/intel_gpu/properties.hpp"
 #include "openvino/runtime/internal_properties.hpp"
 #include "openvino/runtime/properties.hpp"
@@ -317,49 +318,18 @@ ov::hetero::Plugin::QueryResult ov::hetero::Plugin::query_model_update(const std
         }
     };
     if (all_same_gpu_type(device_names) && hetero_query_model_by_device) {
-        const auto& first_device_name = device_names[0];
+        const auto& first_device_name = device_names.front();
         const auto& first_device_config = properties_per_device.at(first_device_name);
-
-        static constexpr const char* transformed_model_property_name = "GPU_TRANSFORMED_MODEL";
-
-        std::vector<ov::PropertyName> supported_internal_properties;
-        try {
-            supported_internal_properties =
-                get_core()->get_property<std::vector<ov::PropertyName>>(first_device_name,
-                                                                        ov::internal::supported_properties);
-        } catch (const ov::Exception& ex) {
-            OPENVINO_THROW("Device ",
-                            first_device_name,
-                            " failed to report supported internal properties required to obtain ",
-                            transformed_model_property_name,
-                            ": ",
-                            ex.what());
-        }
-
-        const bool has_transformed_model_property = std::any_of(supported_internal_properties.begin(),
-                                                                supported_internal_properties.end(),
-                                                                [transformed_model_property_name](
-                                                                    const ov::PropertyName& property) {
-                                                                    return property == transformed_model_property_name;
-                                                                });
-
-        OPENVINO_ASSERT(has_transformed_model_property,
-                        "Device ",
-                        first_device_name,
-                        " does not expose internal property ",
-                        transformed_model_property_name);
 
         ov::AnyMap property_request{first_device_config.begin(), first_device_config.end()};
         property_request[ov::hint::model.name()] = model;
 
-        auto transformed_model = get_core()
-                                     ->get_property(first_device_name, transformed_model_property_name, property_request)
-                                     .as<std::shared_ptr<ov::Model>>();
-        OPENVINO_ASSERT(transformed_model,
-                        "Received empty transformed model from device ",
-                        first_device_name);
+        auto transformed_model =
+            get_core()
+                ->get_property(first_device_name, ov::intel_gpu::internal::transformed_model, property_request)
+                .as<decltype(ov::intel_gpu::internal::transformed_model)::value_type>();
 
-        res.model = transformed_model;
+        res.model = std::move(transformed_model);
         res.is_transformed = true;
     } else {
         res.model = model;

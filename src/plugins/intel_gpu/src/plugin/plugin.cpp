@@ -450,26 +450,29 @@ ov::Any Plugin::get_property(const std::string& name, const ov::AnyMap& options)
 
     if (name == ov::intel_gpu::internal::transformed_model.name()) {
         auto model_it = options.find(ov::hint::model.name());
-        OPENVINO_ASSERT(model_it != options.end(),
-                        "[GPU] ",
-                        ov::intel_gpu::internal::transformed_model.name(),
-                        " property requires ",
-                        ov::hint::model.name(),
-                        " option to be set");
+        if (model_it == options.end()) {
+            OPENVINO_THROW("[GPU] ",
+                           ov::intel_gpu::internal::transformed_model.name(),
+                           " property requires ",
+                           ov::hint::model.name(),
+                           " option to be set");
+        }
 
         auto original_model = model_it->second.as<std::shared_ptr<const ov::Model>>();
-        OPENVINO_ASSERT(original_model,
-                        "[GPU] ",
-                        ov::intel_gpu::internal::transformed_model.name(),
-                        " option received empty model pointer");
+        if (!original_model) {
+            OPENVINO_THROW("[GPU] ",
+                           ov::intel_gpu::internal::transformed_model.name(),
+                           " option received empty model pointer");
+        }
 
         std::string device_id = get_device_id(options);
-        OPENVINO_ASSERT(m_configs_map.find(device_id) != m_configs_map.end(),
-                        "[GPU] get_property: Couldn't find config for GPU with id ",
-                        device_id);
+        auto config_it = m_configs_map.find(device_id);
+        if (config_it == m_configs_map.end()) {
+            OPENVINO_THROW("[GPU] get_property: Couldn't find config for GPU with id ", device_id);
+        }
 
         auto context = get_default_context(device_id);
-        ExecutionConfig config = m_configs_map.at(device_id);
+        ExecutionConfig config = config_it->second;
         ov::AnyMap user_properties{options.begin(), options.end()};
         user_properties.erase(ov::hint::model.name());
         config.set_user_property(user_properties, OptionVisibility::RELEASE);
