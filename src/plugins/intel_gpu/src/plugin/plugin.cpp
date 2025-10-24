@@ -309,18 +309,6 @@ ov::SupportedOpsMap Plugin::query_model(const std::shared_ptr<const ov::Model>& 
     return res;
 }
 
-std::shared_ptr<ov::Model> Plugin::get_transformed_model(const std::shared_ptr<const ov::Model>& model, const ov::AnyMap& properties) const {
-    std::string device_id = get_device_id(properties);
-
-    auto ctx = get_default_context(device_id);
-
-    ExecutionConfig config = m_configs_map.at(device_id);
-    config.set_user_property(properties, OptionVisibility::RELEASE);
-    config.finalize(ctx.get(), model.get());
-
-    return clone_and_transform_model(model, config, ctx);
-}
-
 std::shared_ptr<ov::ICompiledModel> Plugin::import_model(std::istream& model, const ov::AnyMap& config) const {
     std::string device_id = get_device_id(config);
     auto context = get_default_context(device_id);
@@ -459,6 +447,36 @@ ov::Any Plugin::get_property(const std::string& name, const ov::AnyMap& options)
 
     OPENVINO_ASSERT(!m_device_map.empty(), "[GPU] Can't get ", name, " property as no supported devices found or an error happened during devices query.\n"
                                            "[GPU] Please check OpenVINO documentation for GPU drivers setup guide.\n");
+
+    if (name == ov::intel_gpu::internal::transformed_model.name()) {
+        auto model_it = options.find(ov::hint::model.name());
+        OPENVINO_ASSERT(model_it != options.end(),
+                        "[GPU] ",
+                        ov::intel_gpu::internal::transformed_model.name(),
+                        " property requires ",
+                        ov::hint::model.name(),
+                        " option to be set");
+
+        auto original_model = model_it->second.as<std::shared_ptr<const ov::Model>>();
+        OPENVINO_ASSERT(original_model,
+                        "[GPU] ",
+                        ov::intel_gpu::internal::transformed_model.name(),
+                        " option received empty model pointer");
+
+        std::string device_id = get_device_id(options);
+        OPENVINO_ASSERT(m_configs_map.find(device_id) != m_configs_map.end(),
+                        "[GPU] get_property: Couldn't find config for GPU with id ",
+                        device_id);
+
+        auto context = get_default_context(device_id);
+        ExecutionConfig config = m_configs_map.at(device_id);
+        ov::AnyMap user_properties{options.begin(), options.end()};
+        user_properties.erase(ov::hint::model.name());
+        config.set_user_property(user_properties, OptionVisibility::RELEASE);
+
+        auto transformed_model = clone_and_transform_model(original_model, config, context);
+        return decltype(ov::intel_gpu::internal::transformed_model)::value_type{transformed_model};
+    }
 
     if (is_metric(name)) {
         return get_metric(name, options);
@@ -676,7 +694,8 @@ std::vector<ov::PropertyName> Plugin::get_supported_internal_properties() const 
             ov::PropertyName{ov::internal::compiled_model_runtime_properties_supported.name(), ov::PropertyMutability::RO},
             ov::PropertyName{ov::internal::query_model_ratio.name(), PropertyMutability::RW},
             ov::PropertyName{ov::internal::disable_transformation.name(), PropertyMutability::RW},
-            ov::PropertyName{ov::internal::caching_with_mmap.name(), PropertyMutability::RO}};
+            ov::PropertyName{ov::internal::caching_with_mmap.name(), PropertyMutability::RO},
+            ov::PropertyName{ov::intel_gpu::internal::transformed_model.name(), ov::PropertyMutability::RO}};
     return supported_internal_properties;
 }
 
