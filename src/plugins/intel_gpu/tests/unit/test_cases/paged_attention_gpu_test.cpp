@@ -5,6 +5,9 @@
 #include "test_utils.h"
 #include "random_generator.hpp"
 
+#include "openvino/core/type/element_type.hpp"
+#include "openvino/runtime/properties.hpp"
+
 #include <intel_gpu/primitives/activation.hpp>
 #include <intel_gpu/primitives/data.hpp>
 #include <intel_gpu/primitives/eltwise.hpp>
@@ -83,6 +86,8 @@ struct PagedAttentionManager {
     ov::internal::CacheQuantMode key_cache_quant_mode;
     bool has_score_aggregation;
     CacheRotationDescriptor rotation_config;
+    ov::element::Type kv_cache_precision;
+    bool use_xattention;
     std::vector<SubsequenceDescriptor> subsequence_descs;
 
     // per-subsequence QKV inputs
@@ -128,7 +133,9 @@ struct PagedAttentionManager {
                           bool kv_cache_compression,
                           ov::internal::CacheQuantMode key_cache_quant_mode,
                           bool has_score_aggregation,
-                          CacheRotationDescriptor rotation_config)
+                          CacheRotationDescriptor rotation_config,
+                          ov::element::Type kv_cache_precision,
+                          bool use_xattention)
         : num_heads(num_heads)
         , k_head_size(k_head_size)
         , v_head_size(v_head_size)
@@ -138,6 +145,8 @@ struct PagedAttentionManager {
         , key_cache_quant_mode(key_cache_quant_mode)
         , has_score_aggregation(has_score_aggregation)
         , rotation_config(rotation_config)
+        , kv_cache_precision(kv_cache_precision)
+        , use_xattention(use_xattention)
         , subsequence_descs(subsequence_descs)
         , test_engine(engine)
         , test_stream(stream)
@@ -206,6 +215,17 @@ struct PagedAttentionManager {
                 score_aggregation.push_back(window_size);
             }
         }
+
+        if (use_xattention) {
+            for (size_t i = 0; i < subsequence_descs.size(); i++) {
+                auto threshold = static_cast<float>(rg.generate_random_val<float>(0.1f, 0.9f));
+                xattention_threshold.push_back(ov::float16(threshold));
+            }
+
+            xattention_block_size.push_back(block_size);
+            // stride must be positive and aligned with the cache block size in tests
+            xattention_stride.push_back(block_size);
+        }
     }
 
     memory::ptr get_query_memory() {
@@ -225,7 +245,7 @@ struct PagedAttentionManager {
         auto adjusted_head_size = k_head_size;
         auto adjusted_block_size = block_size;
         if (kv_cache_compression) {
-            key_cache_dt = data_types::i8;
+            key_cache_dt = use_unsigned_kv_cache() ? data_types::u8 : data_types::i8;
             if (key_cache_quant_mode == ov::internal::CacheQuantMode::BY_CHANNEL) {
                 adjusted_block_size += 4;
             } else {
@@ -254,7 +274,9 @@ struct PagedAttentionManager {
                                     size_t input_token_offset = block_idx * block_size + token_idx;
                                     token_block[token_idx] = *(key_data[i].data() + input_token_offset * num_heads * k_head_size + head_idx * k_head_size + k_head_size_idx);
                                 }
-                                auto [quantized_data, scale, zp] = quantize_data(token_block.data(), last_token_idx, true);
+                                auto [quantized_data, scale, zp] = use_unsigned_kv_cache()
+                                    ? quantize_data<uint8_t>(token_block.data(), last_token_idx, true)
+                                    : quantize_data<int8_t>(token_block.data(), last_token_idx, true);
                                 size_t output_block_offset = (start_block_idx + block_idx) * num_heads * adjusted_head_size * adjusted_block_size +
                                                              head_idx * adjusted_head_size * adjusted_block_size;
                                 size_t output_offset = output_block_offset +
@@ -279,7 +301,9 @@ struct PagedAttentionManager {
                                     size_t output_block_offset = (start_block_idx + block_idx) * num_heads * adjusted_head_size * block_size +
                                                                  head_idx * adjusted_head_size * block_size;
 
-                                    auto [quantized_data, scale, zp] = quantize_data(data_ptr, k_head_size);
+                                    auto [quantized_data, scale, zp] = use_unsigned_kv_cache()
+                                        ? quantize_data<uint8_t>(data_ptr, k_head_size)
+                                        : quantize_data<int8_t>(data_ptr, k_head_size);
                                     for (int k_head_size_idx = 0; k_head_size_idx < k_head_size; k_head_size_idx++) {
                                         auto quantized_data_ptr = quantized_data.data() + k_head_size_idx;
 
@@ -322,7 +346,7 @@ struct PagedAttentionManager {
         auto value_cache_dt = data_types::f16;
         auto adjusted_head_size = v_head_size;
         if (kv_cache_compression) {
-            value_cache_dt = data_types::i8;
+            value_cache_dt = use_unsigned_kv_cache() ? data_types::u8 : data_types::i8;
             adjusted_head_size += 4;
         }
 
@@ -346,7 +370,9 @@ struct PagedAttentionManager {
                                                     input_token_offset * num_heads * v_head_size +
                                                     head_idx * v_head_size;
                             if (kv_cache_compression) {
-                                auto [quantized_data, scale, zp] = quantize_data(data_ptr, v_head_size);
+                                auto [quantized_data, scale, zp] = use_unsigned_kv_cache()
+                                    ? quantize_data<uint8_t>(data_ptr, v_head_size)
+                                    : quantize_data<int8_t>(data_ptr, v_head_size);
                                 auto quantized_data_ptr = quantized_data.data();
 
                                 // shape: [num_blocks, num_heads, block_size, adjusted_head_size]
@@ -478,11 +504,23 @@ struct PagedAttentionManager {
         return test_engine.reinterpret_buffer(*mem, layout);
     }
 
+    bool has_xattention_inputs() const {
+        return !xattention_threshold.empty();
+    }
+
+    bool has_sink_input() const {
+        return !sinks.empty();
+    }
+
     float get_default_scale() {
         return static_cast<float>(1.f / std::sqrt(k_head_size));
     }
 
 private:
+    bool use_unsigned_kv_cache() const {
+        return kv_cache_compression && kv_cache_precision == ov::element::u8;
+    }
+
     template<typename T>
     memory::ptr get_memory_from_vec(std::vector<T>& input_data) {
         auto data_size = input_data.empty() ? 1 : input_data.size();
@@ -564,7 +602,8 @@ private:
         return data;
     }
 
-    static std::tuple<std::vector<int8_t>, ov::float16, ov::float16> quantize_data(ov::float16* data, size_t size, bool expand_range = false) {
+    template <typename QuantT>
+    static std::tuple<std::vector<QuantT>, ov::float16, ov::float16> quantize_data(ov::float16* data, size_t size, bool expand_range = false) {
         float min_value = std::numeric_limits<float>::max();
         float max_value = std::numeric_limits<float>::lowest();
 
@@ -580,22 +619,23 @@ private:
             // compensate too small range
             diff_value = (max_value - min_value) + std::max(1.0f, max_value * 0.1f);
         }
-        float scale = (std::numeric_limits<int8_t>::max() - std::numeric_limits<int8_t>::lowest()) / diff_value;
-        float zp = ((float)-min_value * scale) + std::numeric_limits<int8_t>::lowest();
+        const float min_q = static_cast<float>(std::numeric_limits<QuantT>::lowest());
+        const float max_q = static_cast<float>(std::numeric_limits<QuantT>::max());
+        float scale = (max_q - min_q) / diff_value;
+        float zp = ((float)-min_value * scale) + min_q;
 
-        std::vector<int8_t> quantized_data;
+        std::vector<QuantT> quantized_data;
         quantized_data.resize(size);
 
-        auto convert_char_rte = [](float val) {
+        auto convert_char_rte = [&](float val) -> QuantT {
             float rounded = std::nearbyint(val);
 
-            if (rounded > 127.0f) {
-                return static_cast<int8_t>(127);
-            } else if (rounded < -128.0f) {
-                return static_cast<int8_t>(-128);
-            } else {
-                return static_cast<int8_t>(rounded);
+            if (rounded > max_q) {
+                rounded = max_q;
+            } else if (rounded < min_q) {
+                rounded = min_q;
             }
+            return static_cast<QuantT>(rounded);
         };
 
         for (size_t i = 0; i < size; i++) {
@@ -923,7 +963,9 @@ public:
                                   p.kv_cache_compression,
                                   p.key_cache_quant_mode,
                                   p.scores_mode == ScoresMode::SNAPKV,
-                                  p.rotation_config);
+                                  p.rotation_config,
+                                  p.kv_cache_precision,
+                                  p.use_xattention);
 
         if (p.kv_cache_compression)
             tolerance = 25e-3;
@@ -1064,6 +1106,8 @@ public:
         pa_prim.has_score_aggregation = p.scores_mode == ScoresMode::SNAPKV;
         pa_prim.sliding_window = p.sliding_window_size;
         pa_prim.is_key_by_channel = (p.key_cache_quant_mode == ov::internal::CacheQuantMode::BY_CHANNEL);
+        pa_prim.has_xattention = pam.has_xattention_inputs();
+        pa_prim.has_sink_input = pam.has_sink_input();
 
         topology topology;
 
@@ -1110,6 +1154,9 @@ public:
         // FlashAttn v1 or v2?
         config.set_property(ov::intel_gpu::could_use_flashattn_v2(p.disable_flashattn_v2));
         config.set_property(ov::internal::key_cache_quant_mode(p.key_cache_quant_mode));
+        if (p.kv_cache_precision != ov::element::i8) {
+            config.set_property(ov::hint::kv_cache_precision(p.kv_cache_precision));
+        }
         network::ptr network = get_network(get_test_engine(), topology, config, get_test_stream_ptr(), false);
         network->set_input_data("query", query_mem);
         network->set_input_data("key", key_mem);
@@ -1178,6 +1225,8 @@ struct paged_attention_test_params {
     ScoresMode scores_mode;
     CacheRotationDescriptor rotation_config;
     bool disable_flashattn_v2;
+    ov::element::Type kv_cache_precision = ov::element::i8;
+    bool use_xattention = false;
 };
 
 class paged_attention_test : public PagedAttentionTest<paged_attention_test_params> {};
@@ -1304,6 +1353,8 @@ INSTANTIATE_TEST_SUITE_P(smoke_paged_attention, paged_attention_test, ::testing:
     paged_attention_test_params{ {{512, 0}}, 2, 64, 32, 16, 20, ENABLE_CACHE_COMPRESSION,ov::internal::CacheQuantMode::BY_TOKEN, DYNAMIC_INPUT_PAD, DISABLE_SCORES, DISABLE_ROTATION, DISABLE_FA_V2 }, // 1st token
     paged_attention_test_params{ {{512, 0}}, 2, 64, 32, 16, 20, ENABLE_CACHE_COMPRESSION,ov::internal::CacheQuantMode::BY_CHANNEL, DYNAMIC_INPUT_PAD, DISABLE_SCORES, DISABLE_ROTATION, DISABLE_FA_V2 }, // 1st token
     paged_attention_test_params{ {{10, 0}, {30, 0}}, 2, 64, 64, 16, 8, ENABLE_CACHE_COMPRESSION,ov::internal::CacheQuantMode::BY_TOKEN, STATIC_INPUT_PAD, ENABLE_SCORES, PER_TOKEN_ROTATION, DISABLE_FA_V2 }, // 2nd token + 2nd token
+    /* XAttention with u8 KV-cache compression */
+    paged_attention_test_params{ {{1, 34}}, 2, 64, 64, 16, 0, ENABLE_CACHE_COMPRESSION,ov::internal::CacheQuantMode::BY_TOKEN, DYNAMIC_INPUT_PAD, DISABLE_SCORES, DISABLE_ROTATION, DISABLE_FA_V2, ov::element::u8, true }, // XAttention + u8 cache
     paged_attention_test_params{ {{128, 0}, {256, 0}}, 2, 48, 64, 16, 128, DISABLE_CACHE_COMPRESSION,ov::internal::CacheQuantMode::BY_TOKEN, STATIC_INPUT_PAD, ENABLE_SCORES, PER_BLOCK_ROTATION, ENABLE_FA_V2 }, // 1st token + 1st token
     paged_attention_test_params{ {{1, 10}}, 2, 64, 64, 16, 4, DISABLE_CACHE_COMPRESSION,ov::internal::CacheQuantMode::BY_TOKEN, STATIC_INPUT_PAD, DISABLE_SCORES, DISABLE_ROTATION, DISABLE_FA_V2 }, // 2nd token
     paged_attention_test_params{ {{1, 10}}, 2, 64, 64, 16, 4, DISABLE_CACHE_COMPRESSION,ov::internal::CacheQuantMode::BY_CHANNEL, STATIC_INPUT_PAD, DISABLE_SCORES, DISABLE_ROTATION, DISABLE_FA_V2 }, // 2nd token
