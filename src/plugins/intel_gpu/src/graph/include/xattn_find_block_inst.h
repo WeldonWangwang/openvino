@@ -39,25 +39,7 @@ public:
         return calc_output_layouts<ov::PartialShape>(node, impl_params)[0];
     }
 
-    static std::string to_string(const xattn_find_block_node& node) {
-        auto node_info = node.desc_to_json();
-        auto& desc = node.get_primitive();
-        node_info->add("heads_num", desc->heads_num);
-        node_info->add("head_size", desc->head_size);
-        node_info->add("q_len", desc->q_len);
-        node_info->add("q_stride", desc->q_stride);
-        node_info->add("k_stride", desc->k_stride);
-        node_info->add("q_stride_pad", desc->q_stride_pad);
-        node_info->add("q_block_pad", desc->q_block_pad);
-        node_info->add("k_block_pad", desc->k_block_pad);
-        node_info->add("causal_start_index", desc->causal_start_index);
-        node_info->add("thresh", desc->thresh);
-        node_info->add("stride", desc->stride);
-        node_info->add("block_size", desc->block_size);
-        node_info->add("is_causal", desc->is_causal);
-        node_info->add("use_int8", desc->use_int8);
-        return node_info->to_string();
-    }
+    static std::string to_string(const xattn_find_block_node& node);
 
     typed_primitive_inst(network& network, const xattn_find_block_node& node)
         : parent(network, node) {}
