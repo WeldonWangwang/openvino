@@ -219,6 +219,7 @@ void ExecutionConfig::apply_model_specific_options(const IRemoteContext* context
             if (has_rotated_blocks && m_key_cache_quant_mode == ov::internal::CacheQuantMode::BY_CHANNEL) {
                 GPU_DEBUG_COUT << "[Warning] BY_CHANNEL quant mode is not supported for cache rotation yet. Switching to BY_TOKEN mode." << std::endl;
                 m_key_cache_quant_mode = ov::internal::CacheQuantMode::BY_TOKEN;
+                m_value_cache_quant_mode = ov::internal::CacheQuantMode::BY_TOKEN;
             }
         }
     };
@@ -245,11 +246,14 @@ void ExecutionConfig::apply_model_specific_options(const IRemoteContext* context
     }
 
     if (!is_set_by_user(ov::internal::value_cache_quant_mode) || get_value_cache_quant_mode() == ov::internal::CacheQuantMode::AUTO) {
-        m_value_cache_quant_mode = ov::internal::CacheQuantMode::BY_TOKEN;
-    } else if (get_value_cache_quant_mode() == ov::internal::CacheQuantMode::BY_CHANNEL) {
-        GPU_DEBUG_COUT << "[Warning] Value cache quantization mode BY_CHANNEL is not supported for GPU plugin. "
+        m_value_cache_quant_mode = m_key_cache_quant_mode;
+    } else if (get_value_cache_quant_mode() == ov::internal::CacheQuantMode::BY_CHANNEL &&
+               m_key_cache_quant_mode != ov::internal::CacheQuantMode::BY_CHANNEL) {
+        GPU_DEBUG_COUT << "[Warning] Value cache quantization mode BY_CHANNEL requires key cache BY_CHANNEL. "
             << "Switching to BY_TOKEN mode." << std::endl;
         m_value_cache_quant_mode = ov::internal::CacheQuantMode::BY_TOKEN;
+    } else {
+        m_value_cache_quant_mode = get_value_cache_quant_mode();
     }
     // Disable FlashAttn V2 online softmax tricks by default for non-LLMs.
     if (!is_set_by_user(ov::intel_gpu::could_use_flashattn_v2) && !is_LLM) {
