@@ -28,6 +28,10 @@ constexpr size_t reduce_split_step = 16;
 
 #define DEBUG_ENABLED 0
 
+inline size_t get_element_size(const ov::element::Type& type) {
+    return type.size();
+}
+
 // This function returns the kv_step and kv_split_len based on the architecture.
 // return {kv_step, kv_split_len}
 inline std::pair<size_t, size_t> get_kv_split_size(size_t arch) {
@@ -190,14 +194,29 @@ JitConstants PagedAttentionGeneratorKVCacheUpdate::get_jit_constants(const kerne
         jit.make("PAGED_ATTENTION_BLOCK_SIZE", PA_KV_CACHE_BLOCK_SIZE);
     }
 
-    if (get_kv_compressed(params)) {
+    const bool kv_compressed = get_kv_compressed(params);
+    const bool is_key_by_channel = desc->is_key_by_channel;
+    const size_t base_block_size = desc->has_xattention ? PA_KV_CACHE_BLOCK_SIZE_XATTN : PA_KV_CACHE_BLOCK_SIZE;
+    jit.make("IS_KEY_BY_CHANNEL", is_key_by_channel ? 1 : 0);
+
+    if (kv_compressed) {
+        auto data_type = params.input_layouts[PagedAttentionInputIdx::KEY].data_type;
+        const size_t comp_extra = get_element_size(data_type) * 2;
+
         jit.make("KV_CACHE_COMPRESSION_PER_TOKEN", 1);
-        jit.make("ADJUSTED_K_HEAD_SIZE", desc->k_head_size + 4);
-        jit.make("ADJUSTED_V_HEAD_SIZE", desc->v_head_size + 4);
+        if (is_key_by_channel) {
+            jit.make("ADJUSTED_K_HEAD_SIZE", desc->k_head_size);
+            jit.make("ADJUSTED_BLOCK_SIZE_KEY", base_block_size + comp_extra);
+        } else {
+            jit.make("ADJUSTED_K_HEAD_SIZE", desc->k_head_size + comp_extra);
+            jit.make("ADJUSTED_BLOCK_SIZE_KEY", base_block_size);
+        }
+        jit.make("ADJUSTED_V_HEAD_SIZE", desc->v_head_size + comp_extra);
     } else {
         jit.make("KV_CACHE_COMPRESSION_PER_TOKEN", 0);
         jit.make("ADJUSTED_K_HEAD_SIZE", desc->k_head_size);
         jit.make("ADJUSTED_V_HEAD_SIZE", desc->v_head_size);
+        jit.make("ADJUSTED_BLOCK_SIZE_KEY", base_block_size);
     }
 
     return jit;

@@ -106,7 +106,7 @@ static void CreatePagedAttentionExtensionOp(ProgramBuilder& p, const std::shared
     OPENVINO_ASSERT(sinks_const != nullptr);
     prim.has_sink_input = ov::shape_size(sinks_const->get_output_shape(0)) > 0;
 
-    prim.is_key_by_channel = p.get_config().get_key_cache_quant_mode() == ov::internal::CacheQuantMode::BY_CHANNEL;
+    prim.is_key_by_channel = p.get_config().get_is_key_cache_by_channel();
     prim.num_outputs = 1;
 
     if (op->get_output_size() > 1) {
