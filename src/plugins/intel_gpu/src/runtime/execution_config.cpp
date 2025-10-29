@@ -186,7 +186,18 @@ void ExecutionConfig::apply_model_specific_options(const IRemoteContext* context
 
     const auto& ops = model.get_ops();
 
-    std::function<void(std::shared_ptr<Node>)> process_op = [&, this](std::shared_ptr<Node> op) {
+    m_is_key_cache_by_channel = (m_key_cache_quant_mode == ov::internal::CacheQuantMode::BY_CHANNEL);
+
+    auto disable_key_by_channel = [&](const std::string& message) {
+        if (!m_is_key_cache_by_channel)
+            return;
+
+        GPU_DEBUG_COUT << "[Warning] " << message << " Switching to BY_TOKEN mode." << std::endl;
+        m_is_key_cache_by_channel = false;
+        m_key_cache_quant_mode = ov::internal::CacheQuantMode::BY_TOKEN;
+    };
+
+    std::function<void(std::shared_ptr<Node>)> process_op = [&, this, disable_key_by_channel](std::shared_ptr<Node> op) {
         if (requires_new_shape_infer(op)) {
             m_allow_new_shape_infer = true;
         }
@@ -216,9 +227,8 @@ void ExecutionConfig::apply_model_specific_options(const IRemoteContext* context
             const size_t rotated_block_indices_idx = paged_attn_op->get_input_size() > cldnn::paged_attention::PagedAttentionInputIdx::ROTATED_BLOCK_INDICES;
             auto rotated_block_indices_input = ov::as_type_ptr<ov::op::v0::Parameter>(paged_attn_op->get_input_node_shared_ptr(rotated_block_indices_idx));
             bool has_rotated_blocks = rotated_block_indices_input && rotated_block_indices_input->get_output_partial_shape(0).is_dynamic();
-            if (has_rotated_blocks && m_key_cache_quant_mode == ov::internal::CacheQuantMode::BY_CHANNEL) {
-                GPU_DEBUG_COUT << "[Warning] BY_CHANNEL quant mode is not supported for cache rotation yet. Switching to BY_TOKEN mode." << std::endl;
-                m_key_cache_quant_mode = ov::internal::CacheQuantMode::BY_TOKEN;
+            if (has_rotated_blocks) {
+                disable_key_by_channel("BY_CHANNEL quant mode is not supported for cache rotation yet.");
             }
         }
     };
@@ -244,12 +254,18 @@ void ExecutionConfig::apply_model_specific_options(const IRemoteContext* context
         m_key_cache_quant_mode = ov::internal::CacheQuantMode::BY_CHANNEL;
     }
 
+    m_is_key_cache_by_channel = (m_key_cache_quant_mode == ov::internal::CacheQuantMode::BY_CHANNEL);
+
     if (!is_set_by_user(ov::internal::value_cache_quant_mode) || get_value_cache_quant_mode() == ov::internal::CacheQuantMode::AUTO) {
         m_value_cache_quant_mode = ov::internal::CacheQuantMode::BY_TOKEN;
     } else if (get_value_cache_quant_mode() == ov::internal::CacheQuantMode::BY_CHANNEL) {
         GPU_DEBUG_COUT << "[Warning] Value cache quantization mode BY_CHANNEL is not supported for GPU plugin. "
             << "Switching to BY_TOKEN mode." << std::endl;
         m_value_cache_quant_mode = ov::internal::CacheQuantMode::BY_TOKEN;
+    }
+
+    if (!m_is_key_cache_by_channel && m_key_cache_quant_mode == ov::internal::CacheQuantMode::BY_CHANNEL) {
+        m_key_cache_quant_mode = ov::internal::CacheQuantMode::BY_TOKEN;
     }
     // Disable FlashAttn V2 online softmax tricks by default for non-LLMs.
     if (!is_set_by_user(ov::intel_gpu::could_use_flashattn_v2) && !is_LLM) {

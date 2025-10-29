@@ -45,6 +45,12 @@ protected:
     void apply_priority_hints(const cldnn::device_info& info);
 
     #include "intel_gpu/runtime/options.inl"
+
+public:
+    bool get_is_key_cache_by_channel() const { return m_is_key_cache_by_channel; }
+
+protected:
+    bool m_is_key_cache_by_channel = false;
 };
 
 }  // namespace ov::intel_gpu
