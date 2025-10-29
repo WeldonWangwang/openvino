@@ -106,7 +106,12 @@ static void CreatePagedAttentionExtensionOp(ProgramBuilder& p, const std::shared
     OPENVINO_ASSERT(sinks_const != nullptr);
     prim.has_sink_input = ov::shape_size(sinks_const->get_output_shape(0)) > 0;
 
-    prim.is_key_by_channel = p.get_config().get_key_cache_quant_mode() == ov::internal::CacheQuantMode::BY_CHANNEL;
+    const auto key_cache_type = op->get_input_element_type(cldnn::paged_attention::PagedAttentionInputIdx::KEY_CACHE);
+    const bool key_cache_compressed = key_cache_type == ov::element::i8 || key_cache_type == ov::element::u8;
+    const auto& config = p.get_config();
+    const bool quant_by_channel = config.get_key_cache_quant_mode() == ov::internal::CacheQuantMode::BY_CHANNEL;
+    const bool allow_compression_padding = config.get_allow_kv_cache_compression_padding() && key_cache_compressed;
+    prim.is_key_by_channel = quant_by_channel || allow_compression_padding;
     prim.num_outputs = 1;
 
     if (op->get_output_size() > 1) {

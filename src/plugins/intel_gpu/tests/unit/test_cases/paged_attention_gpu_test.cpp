@@ -1324,7 +1324,11 @@ public:
         pa_prim.has_rotated_blocks = p.rotation_config.apply_rotation;
         pa_prim.has_score_aggregation = p.scores_mode == ScoresMode::SNAPKV;
         pa_prim.sliding_window = p.sliding_window_size;
-        pa_prim.is_key_by_channel = (p.key_cache_quant_mode == ov::internal::CacheQuantMode::BY_CHANNEL);
+        bool treat_key_by_channel = (p.key_cache_quant_mode == ov::internal::CacheQuantMode::BY_CHANNEL);
+        if (!treat_key_by_channel && p.kv_cache_compression && !p.rotation_config.apply_rotation) {
+            treat_key_by_channel = true;
+        }
+        pa_prim.is_key_by_channel = treat_key_by_channel;
         if (p.has_xattention) {
             pa_prim.has_xattention = true;
         }

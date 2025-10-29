@@ -185,6 +185,7 @@ void ExecutionConfig::apply_model_specific_options(const IRemoteContext* context
     apply_rt_info(context, get_rt_info(model), is_LLM, is_paged_attention_model);
 
     const auto& ops = model.get_ops();
+    bool disallow_kv_cache_padding = false;
 
     std::function<void(std::shared_ptr<Node>)> process_op = [&, this](std::shared_ptr<Node> op) {
         if (requires_new_shape_infer(op)) {
@@ -216,9 +217,19 @@ void ExecutionConfig::apply_model_specific_options(const IRemoteContext* context
             const size_t rotated_block_indices_idx = paged_attn_op->get_input_size() > cldnn::paged_attention::PagedAttentionInputIdx::ROTATED_BLOCK_INDICES;
             auto rotated_block_indices_input = ov::as_type_ptr<ov::op::v0::Parameter>(paged_attn_op->get_input_node_shared_ptr(rotated_block_indices_idx));
             bool has_rotated_blocks = rotated_block_indices_input && rotated_block_indices_input->get_output_partial_shape(0).is_dynamic();
+            auto key_cache_type = paged_attn_op->get_input_element_type(cldnn::paged_attention::PagedAttentionInputIdx::KEY_CACHE);
+            bool key_cache_compressed = key_cache_type == ov::element::i8 || key_cache_type == ov::element::u8;
+
             if (has_rotated_blocks && m_key_cache_quant_mode == ov::internal::CacheQuantMode::BY_CHANNEL) {
                 GPU_DEBUG_COUT << "[Warning] BY_CHANNEL quant mode is not supported for cache rotation yet. Switching to BY_TOKEN mode." << std::endl;
                 m_key_cache_quant_mode = ov::internal::CacheQuantMode::BY_TOKEN;
+            }
+
+            if (has_rotated_blocks) {
+                disallow_kv_cache_padding = true;
+                m_allow_kv_cache_compression_padding = false;
+            } else if (key_cache_compressed && !disallow_kv_cache_padding) {
+                m_allow_kv_cache_compression_padding = true;
             }
         }
     };
