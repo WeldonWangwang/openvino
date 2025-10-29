@@ -136,7 +136,8 @@ extern "C" _GENX_MAIN_ void KERNEL_NAME(
  #endif
 
 #if CMPA_KVCACHE_U8
-    uint kv_offset = hkv*(head_size+4)*pa_block_sz;
+    constexpr uint key_block_pitch = KEY_BLOCK_PITCH;
+    uint kv_offset = hkv*key_block_pitch;
     pa_lsc_u8<is_causal, num_heads, num_kv_heads, head_size, 0>(
                             slm_K,
                             slm_V,

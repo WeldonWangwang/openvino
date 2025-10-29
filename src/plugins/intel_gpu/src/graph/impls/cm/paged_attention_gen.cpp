@@ -24,6 +24,54 @@ using namespace cldnn;
 namespace {
 constexpr size_t WG_SIZE = 16;
 constexpr size_t reduce_split_step = 16;
+
+struct CacheLayoutConstants {
+    size_t adjusted_head_size = 0;
+    size_t adjusted_block_size = 0;
+    size_t block_pitch = 0;
+    size_t scale_offset = 0;
+};
+
+CacheLayoutConstants get_cache_layout_constants(size_t head_size,
+                                                size_t block_size,
+                                                data_types data_type,
+                                                bool is_compressed,
+                                                bool is_by_channel) {
+    CacheLayoutConstants constants{};
+    constants.adjusted_head_size = head_size;
+    constants.adjusted_block_size = block_size;
+    constants.block_pitch = head_size * block_size;
+    constants.scale_offset = 0;
+
+    if (!is_compressed)
+        return constants;
+
+    const size_t scale_zp_size = data_type_traits::size_of(data_type) * 2;
+    if (is_by_channel) {
+        constants.adjusted_block_size += scale_zp_size;
+        constants.scale_offset = block_size;
+    } else {
+        constants.adjusted_head_size += scale_zp_size;
+        constants.scale_offset = head_size * block_size;
+    }
+    constants.block_pitch = constants.adjusted_head_size * constants.adjusted_block_size;
+
+    return constants;
+}
+
+void add_cache_constants(JitConstants& jit,
+                         const CacheLayoutConstants& key_consts,
+                         const CacheLayoutConstants& value_consts,
+                         bool is_key_by_channel) {
+    jit.make("IS_KEY_BY_CHANNEL", is_key_by_channel ? 1 : 0);
+    jit.make("ADJUSTED_K_HEAD_SIZE", key_consts.adjusted_head_size);
+    jit.make("ADJUSTED_BLOCK_SIZE_KEY", key_consts.adjusted_block_size);
+    jit.make("KEY_BLOCK_PITCH", key_consts.block_pitch);
+    jit.make("KEY_SCALE_OFFSET", key_consts.scale_offset);
+    jit.make("ADJUSTED_V_HEAD_SIZE", value_consts.adjusted_head_size);
+    jit.make("VALUE_BLOCK_PITCH", value_consts.block_pitch);
+    jit.make("VALUE_SCALE_OFFSET", value_consts.scale_offset);
+}
 }  // namespace
 
 #define DEBUG_ENABLED 0
@@ -184,21 +232,28 @@ JitConstants PagedAttentionGeneratorKVCacheUpdate::get_jit_constants(const kerne
     jit.make("KV_HEADS_NUM", desc->kv_heads_num);
     jit.make("K_HEAD_SIZE", desc->k_head_size);
     jit.make("V_HEAD_SIZE", desc->v_head_size);
-    if (desc->has_xattention) {
-        jit.make("PAGED_ATTENTION_BLOCK_SIZE", PA_KV_CACHE_BLOCK_SIZE_XATTN);
-    } else {
-        jit.make("PAGED_ATTENTION_BLOCK_SIZE", PA_KV_CACHE_BLOCK_SIZE);
-    }
 
-    if (get_kv_compressed(params)) {
-        jit.make("KV_CACHE_COMPRESSION_PER_TOKEN", 1);
-        jit.make("ADJUSTED_K_HEAD_SIZE", desc->k_head_size + 4);
-        jit.make("ADJUSTED_V_HEAD_SIZE", desc->v_head_size + 4);
-    } else {
-        jit.make("KV_CACHE_COMPRESSION_PER_TOKEN", 0);
-        jit.make("ADJUSTED_K_HEAD_SIZE", desc->k_head_size);
-        jit.make("ADJUSTED_V_HEAD_SIZE", desc->v_head_size);
-    }
+    const bool is_xattention = desc->has_xattention;
+    const size_t block_size = is_xattention ? PA_KV_CACHE_BLOCK_SIZE_XATTN : PA_KV_CACHE_BLOCK_SIZE;
+    jit.make("PAGED_ATTENTION_BLOCK_SIZE", block_size);
+
+    const bool is_compressed = get_kv_compressed(params);
+    jit.make("KV_CACHE_COMPRESSION_PER_TOKEN", is_compressed ? 1 : 0);
+
+    const auto& key_layout = params.input_layouts[PagedAttentionInputIdx::KEY];
+    const auto& value_layout = params.input_layouts[PagedAttentionInputIdx::VALUE];
+    const auto key_consts = get_cache_layout_constants(desc->k_head_size,
+                                                       block_size,
+                                                       key_layout.data_type,
+                                                       is_compressed,
+                                                       desc->is_key_by_channel);
+    const auto value_consts = get_cache_layout_constants(desc->v_head_size,
+                                                         block_size,
+                                                         value_layout.data_type,
+                                                         is_compressed,
+                                                         false);
+
+    add_cache_constants(jit, key_consts, value_consts, desc->is_key_by_channel);
 
     return jit;
 }
@@ -343,11 +398,23 @@ JitConstants PagedAttentionGeneratorMultiToken::get_jit_constants(const kernel_i
     }
     jit.make("Q_STEP", get_q_step(xe_arch, true));
 
-    if (get_kv_compressed(params)) {
-        jit.make("CMPA_KVCACHE_U8", 1);
-    } else {
-        jit.make("CMPA_KVCACHE_U8", 0);
-    }
+    const bool is_compressed = get_kv_compressed(params);
+    jit.make("CMPA_KVCACHE_U8", is_compressed ? 1 : 0);
+
+    const auto& key_layout = params.input_layouts[PagedAttentionInputIdx::KEY_CACHE];
+    const auto& value_layout = params.input_layouts[PagedAttentionInputIdx::VALUE_CACHE];
+    const size_t block_size = desc->has_xattention ? PA_KV_CACHE_BLOCK_SIZE_XATTN : PA_KV_CACHE_BLOCK_SIZE;
+    const auto key_consts = get_cache_layout_constants(desc->k_head_size,
+                                                       block_size,
+                                                       key_layout.data_type,
+                                                       is_compressed,
+                                                       desc->is_key_by_channel);
+    const auto value_consts = get_cache_layout_constants(desc->v_head_size,
+                                                         block_size,
+                                                         value_layout.data_type,
+                                                         is_compressed,
+                                                         false);
+    add_cache_constants(jit, key_consts, value_consts, desc->is_key_by_channel);
     return jit;
 }
 
@@ -420,11 +487,23 @@ JitConstants PagedAttentionGeneratorSingleToken::get_jit_constants(const kernel_
     jit.make("KV_HEADS_NUM", desc->kv_heads_num);
     jit.make("Q_STEP", get_q_step(xe_arch, true));
 
-    if (get_kv_compressed(params)) {
-        jit.make("KV_CACHE_COMPRESSION", 1);
-    } else {
-        jit.make("KV_CACHE_COMPRESSION", 0);
-    }
+    const bool is_compressed = get_kv_compressed(params);
+    jit.make("KV_CACHE_COMPRESSION", is_compressed ? 1 : 0);
+
+    const auto& key_cache_layout = params.input_layouts[PagedAttentionInputIdx::KEY_CACHE];
+    const auto& value_cache_layout = params.input_layouts[PagedAttentionInputIdx::VALUE_CACHE];
+    const size_t block_size = desc->has_xattention ? PA_KV_CACHE_BLOCK_SIZE_XATTN : PA_KV_CACHE_BLOCK_SIZE;
+    const auto key_consts = get_cache_layout_constants(desc->k_head_size,
+                                                       block_size,
+                                                       key_cache_layout.data_type,
+                                                       is_compressed,
+                                                       desc->is_key_by_channel);
+    const auto value_consts = get_cache_layout_constants(desc->v_head_size,
+                                                         block_size,
+                                                         value_cache_layout.data_type,
+                                                         is_compressed,
+                                                         false);
+    add_cache_constants(jit, key_consts, value_consts, desc->is_key_by_channel);
 
     return jit;
 }
@@ -591,13 +670,23 @@ JitConstants XAttentionEstimateGeneratorBase::get_jit_constants(const kernel_imp
     //# loop order walks HQ first and the step is WALK_HQ, 1 means not walk HQ, 2 means walks 2 heads first. Valid value: 1, 2, 4...
     jit.make("WALK_HQ", desc->heads_num != desc->kv_heads_num ? 2 : 1);
     jit.make("IS_CAUSAL", 1);
-    if (get_kv_compressed(params)) {
-        jit.make("USE_INT8", 1);
-        jit.make("HEAD_SIZE_KEY", desc->k_head_size + 2 * 2);
-    } else {
-        jit.make("USE_INT8", 0);
-        jit.make("HEAD_SIZE_KEY", desc->k_head_size);
-    }
+    const bool is_compressed = get_kv_compressed(params);
+    jit.make("USE_INT8", is_compressed ? 1 : 0);
+
+    const auto& key_layout = params.input_layouts[PagedAttentionInputIdx::KEY_CACHE];
+    const auto& value_layout = params.input_layouts[PagedAttentionInputIdx::VALUE_CACHE];
+    const auto key_consts = get_cache_layout_constants(desc->k_head_size,
+                                                       PA_KV_CACHE_BLOCK_SIZE_XATTN,
+                                                       key_layout.data_type,
+                                                       is_compressed,
+                                                       desc->is_key_by_channel);
+    const auto value_consts = get_cache_layout_constants(desc->v_head_size,
+                                                         PA_KV_CACHE_BLOCK_SIZE_XATTN,
+                                                         value_layout.data_type,
+                                                         is_compressed,
+                                                         false);
+    add_cache_constants(jit, key_consts, value_consts, desc->is_key_by_channel);
+    jit.make("HEAD_SIZE_KEY", key_consts.adjusted_head_size);
     jit.make("SOFTMAX_TYPE", "float");
 
     return jit;

@@ -84,7 +84,7 @@ extern "C" _GENX_MAIN_ void KERNEL_NAME(
     #if KV_CACHE_COMPRESSION_PER_TOKEN
     // Assume: K_HEAD_SIZE == K_HEAD_SIZE
     auto quantize_and_store = [&](vector<half, K_HEAD_SIZE> data, uchar* out, uint out_offset, uint token_pos) {
-            uint scale_offset = out_offset + K_HEAD_SIZE * PAGED_ATTENTION_BLOCK_SIZE + token_pos * sizeof(half);
+            uint scale_offset = out_offset + KEY_SCALE_OFFSET + token_pos * sizeof(half);
             half max_val = cm_reduced_max<half>(data);
             half min_val = cm_reduced_min<half>(data);
             half scale_val = half(0.0);
@@ -106,7 +106,7 @@ extern "C" _GENX_MAIN_ void KERNEL_NAME(
     #endif
 
     {
-        uint block_k_base_offset = (block_indices[block_offset] * KV_HEADS_NUM + head_idx) * ADJUSTED_K_HEAD_SIZE * PAGED_ATTENTION_BLOCK_SIZE;
+        uint block_k_base_offset = (block_indices[block_offset] * KV_HEADS_NUM + head_idx) * KEY_BLOCK_PITCH;
         uint key_out_offset = block_k_base_offset + token_start_pos * K_HEAD_SIZE;
         uint key_in_offset = token_idx * key_pitch + head_idx * K_HEAD_SIZE + key_offset;
 
@@ -120,7 +120,7 @@ extern "C" _GENX_MAIN_ void KERNEL_NAME(
         #endif
     }
     {
-        uint block_v_base_offset = (block_indices[block_offset] * KV_HEADS_NUM + head_idx) * ADJUSTED_V_HEAD_SIZE * PAGED_ATTENTION_BLOCK_SIZE;
+        uint block_v_base_offset = (block_indices[block_offset] * KV_HEADS_NUM + head_idx) * VALUE_BLOCK_PITCH;
         uint value_out_offset = block_v_base_offset + token_start_pos * V_HEAD_SIZE;
         uint value_in_offset = token_idx * value_pitch + head_idx * V_HEAD_SIZE + value_offset;
 
