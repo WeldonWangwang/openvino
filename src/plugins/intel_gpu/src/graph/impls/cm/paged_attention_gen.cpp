@@ -166,6 +166,10 @@ JitConstants PagedAttentionGeneratorBase::get_jit_constants(const kernel_impl_pa
     auto xe_arch = params.get_device_info().arch < gpu_arch::xe2 ? 1 : 2;
     jit.make("XE_ARCH", xe_arch);
 
+    const auto desc = params.typed_desc<paged_attention>();
+    jit.make("CMPA_KEY_BY_CHANNEL", static_cast<int32_t>(desc->is_key_by_channel));
+    jit.make("CMPA_KV_CHANNEL_PAD", desc->is_key_by_channel ? 4 : 0);
+
     auto split_size = get_kv_split_size(xe_arch);
     jit.make("KV_STEP", split_size.first);
 

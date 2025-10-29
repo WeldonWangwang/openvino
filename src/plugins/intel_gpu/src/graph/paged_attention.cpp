@@ -34,16 +34,21 @@ std::vector<layout> paged_attention_inst::calc_output_layouts(paged_attention_no
 
     const auto key_cache_idx = cldnn::paged_attention::PagedAttentionInputIdx::KEY_CACHE;
     const auto& key_cache_ps = impl_param.get_input_layout(key_cache_idx).get_partial_shape();
-    const auto& key_cache_quant_mode = impl_param.get_program().get_config().get_key_cache_quant_mode();
+    const auto& program_config = impl_param.get_program().get_config();
+    const auto& key_cache_quant_mode = program_config.get_key_cache_quant_mode();
+    const bool allow_compression_padding = program_config.get_allow_kv_cache_compression_padding();
     bool key_cache_compressed = impl_param.get_input_layout(key_cache_idx).data_type == ov::element::i8 ||
                                 impl_param.get_input_layout(key_cache_idx).data_type == ov::element::u8;
     auto expected_block_size = desc->has_xattention ? paged_attention::block_size_xattn : paged_attention::block_size;
-    if (key_cache_compressed && key_cache_quant_mode == ov::internal::CacheQuantMode::BY_CHANNEL) {
+    if (desc->is_key_by_channel) {
         expected_block_size += 4;
     }
-    OPENVINO_ASSERT((key_cache_quant_mode == ov::internal::CacheQuantMode::BY_CHANNEL) == desc->is_key_by_channel,
+    const bool expect_key_by_channel = (key_cache_quant_mode == ov::internal::CacheQuantMode::BY_CHANNEL) ||
+                                       (allow_compression_padding && key_cache_compressed);
+    OPENVINO_ASSERT(expect_key_by_channel == desc->is_key_by_channel,
                      "[GPU] Paged Attention key cache quantization mode mismatch: prim.is_key_by_channel : ",
-                     desc->is_key_by_channel, " but exec_config : ", impl_param.get_program().get_config().get_key_cache_quant_mode());
+                     desc->is_key_by_channel, " but exec_config : ", program_config.get_key_cache_quant_mode(),
+                     ", allow_compression_padding : ", allow_compression_padding);
 
     const auto block_size_idx = desc->has_xattention ? 2 : 3;
     bool valid_block_size = key_cache_ps.is_dynamic() ||

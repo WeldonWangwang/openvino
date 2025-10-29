@@ -774,11 +774,17 @@ protected:
 
         const auto desc = params.typed_desc<paged_attention>();
         const auto is_key_by_channel = desc->is_key_by_channel;
-        OPENVINO_ASSERT(is_key_by_channel == (params.get_program().get_config().get_key_cache_quant_mode() == ov::internal::CacheQuantMode::BY_CHANNEL),
+        const auto& program_config = params.get_program().get_config();
+        const bool allow_padding = program_config.get_allow_kv_cache_compression_padding();
+        const bool is_kv_compressed = get_kv_compressed(params);
+        const bool expect_key_by_channel = (program_config.get_key_cache_quant_mode() == ov::internal::CacheQuantMode::BY_CHANNEL) ||
+                                           (allow_padding && is_kv_compressed);
+        OPENVINO_ASSERT(expect_key_by_channel == is_key_by_channel,
                         "[GPU] Paged Attention key cache quantization mode mismatch: prim.key_cache_by_channel : ",
                         is_key_by_channel,
                         " and exec_config : ",
-                        params.get_program().get_config().get_key_cache_quant_mode());
+                        program_config.get_key_cache_quant_mode(),
+                        ", allow_compression_padding : ", allow_padding);
 
         // const auto pa_block_size = static_cast<int32_t>(paged_attention::block_size);
         jit.make("K_HEAD_SIZE", desc->k_head_size);
@@ -790,7 +796,6 @@ protected:
         jit.make("GENERATE_STAGE_K_BLOCK_SIZE", get_generate_stage_block_size(desc->k_head_size));
         jit.make("GENERATE_STAGE_V_BLOCK_SIZE", get_generate_stage_block_size(desc->v_head_size));
 
-        const bool is_kv_compressed = get_kv_compressed(params);
         jit.make("IS_KV_COMPRESSED", is_kv_compressed ? 1 : 0);
         if (is_kv_compressed) {
             auto data_type = params.input_layouts[PagedAttentionInputIdx::KEY].data_type;  // key tensor data size
