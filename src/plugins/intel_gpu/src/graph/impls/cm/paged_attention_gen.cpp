@@ -199,6 +199,8 @@ JitConstants PagedAttentionGeneratorKVCacheUpdate::get_jit_constants(const kerne
         jit.make("ADJUSTED_K_HEAD_SIZE", desc->k_head_size);
         jit.make("ADJUSTED_V_HEAD_SIZE", desc->v_head_size);
     }
+    jit.make("KV_CACHE_KEY_BY_CHANNEL", desc->is_key_by_channel ? 1 : 0);
+    jit.make("KV_CACHE_VALUE_BY_CHANNEL", desc->is_value_by_channel ? 1 : 0);
 
     return jit;
 }
@@ -348,6 +350,8 @@ JitConstants PagedAttentionGeneratorMultiToken::get_jit_constants(const kernel_i
     } else {
         jit.make("CMPA_KVCACHE_U8", 0);
     }
+    jit.make("CMPA_KEY_BY_CHANNEL", desc->is_key_by_channel ? 1 : 0);
+    jit.make("CMPA_VALUE_BY_CHANNEL", desc->is_value_by_channel ? 1 : 0);
     return jit;
 }
 

@@ -33,23 +33,45 @@ std::vector<layout> paged_attention_inst::calc_output_layouts(paged_attention_no
     data_layout.data_padding = padding();
 
     const auto key_cache_idx = cldnn::paged_attention::PagedAttentionInputIdx::KEY_CACHE;
-    const auto& key_cache_ps = impl_param.get_input_layout(key_cache_idx).get_partial_shape();
+    const auto& key_cache_layout = impl_param.get_input_layout(key_cache_idx);
+    const auto& key_cache_ps = key_cache_layout.get_partial_shape();
     const auto& key_cache_quant_mode = impl_param.get_program().get_config().get_key_cache_quant_mode();
-    bool key_cache_compressed = impl_param.get_input_layout(key_cache_idx).data_type == ov::element::i8 ||
-                                impl_param.get_input_layout(key_cache_idx).data_type == ov::element::u8;
+    bool key_cache_compressed = key_cache_layout.data_type == ov::element::i8 ||
+                                key_cache_layout.data_type == ov::element::u8;
     auto expected_block_size = desc->has_xattention ? paged_attention::block_size_xattn : paged_attention::block_size;
-    if (key_cache_compressed && key_cache_quant_mode == ov::internal::CacheQuantMode::BY_CHANNEL) {
+    if (key_cache_compressed && desc->is_key_by_channel) {
         expected_block_size += 4;
     }
     OPENVINO_ASSERT((key_cache_quant_mode == ov::internal::CacheQuantMode::BY_CHANNEL) == desc->is_key_by_channel,
                      "[GPU] Paged Attention key cache quantization mode mismatch: prim.is_key_by_channel : ",
                      desc->is_key_by_channel, " but exec_config : ", impl_param.get_program().get_config().get_key_cache_quant_mode());
 
-    const auto block_size_idx = desc->has_xattention ? 2 : 3;
+    const auto key_block_size_idx = desc->has_xattention ? 2 : 3;
     bool valid_block_size = key_cache_ps.is_dynamic() ||
-                            (key_cache_ps[block_size_idx].get_length() == static_cast<ov::Dimension::value_type>(expected_block_size));
+                            (key_cache_ps[key_block_size_idx].get_length() == static_cast<ov::Dimension::value_type>(expected_block_size));
     OPENVINO_ASSERT(valid_block_size, "[GPU] Incorrect block size for Paged Attention operation for key cache quant mode "
-                    , key_cache_quant_mode, ". Expected ", expected_block_size, ", but got ", key_cache_ps[block_size_idx].get_length());
+                    , key_cache_quant_mode, ". Expected ", expected_block_size, ", but got ", key_cache_ps[key_block_size_idx].get_length());
+
+    const auto value_cache_idx = cldnn::paged_attention::PagedAttentionInputIdx::VALUE_CACHE;
+    const auto& value_cache_layout = impl_param.get_input_layout(value_cache_idx);
+    const auto& value_cache_ps = value_cache_layout.get_partial_shape();
+    const auto& value_cache_quant_mode = impl_param.get_program().get_config().get_value_cache_quant_mode();
+    bool value_cache_compressed = value_cache_layout.data_type == ov::element::i8 ||
+                                  value_cache_layout.data_type == ov::element::u8;
+    auto expected_value_block_size = desc->has_xattention ? paged_attention::block_size_xattn : paged_attention::block_size;
+    if (value_cache_compressed && desc->is_value_by_channel) {
+        expected_value_block_size += 4;
+    }
+
+    OPENVINO_ASSERT((value_cache_quant_mode == ov::internal::CacheQuantMode::BY_CHANNEL) == desc->is_value_by_channel,
+                    "[GPU] Paged Attention value cache quantization mode mismatch: prim.is_value_by_channel : ",
+                    desc->is_value_by_channel, " but exec_config : ", impl_param.get_program().get_config().get_value_cache_quant_mode());
+
+    const auto value_block_size_idx = 2;
+    bool valid_value_block_size = value_cache_ps.is_dynamic() ||
+                                  (value_cache_ps[value_block_size_idx].get_length() == static_cast<ov::Dimension::value_type>(expected_value_block_size));
+    OPENVINO_ASSERT(valid_value_block_size, "[GPU] Incorrect block size for Paged Attention operation for value cache quant mode "
+                    , value_cache_quant_mode, ". Expected ", expected_value_block_size, ", but got ", value_cache_ps[value_block_size_idx].get_length());
 
     // TODO: as a preview feature, only single sequence is supported so far. Will remove this check once
     // full function ready in near future.
@@ -110,6 +132,7 @@ std::string paged_attention_inst::to_string(const paged_attention_node& node) {
     paged_attention_info.add("value_cache_dt", node.get_input_layout(cldnn::paged_attention::PagedAttentionInputIdx::VALUE_CACHE).data_type);
     paged_attention_info.add("score_output", desc->has_scores_output());
     paged_attention_info.add("is_key_by_channel", desc->is_key_by_channel);
+    paged_attention_info.add("is_value_by_channel", desc->is_value_by_channel);
     paged_attention_info.add("score_aggregation", desc->has_score_aggregation);
     node_info->add("paged_attention primitive info", paged_attention_info);
     node_info->dump(primitive_description);
