@@ -46,12 +46,13 @@ CacheLayoutConstants get_cache_layout_constants(size_t head_size,
     if (!is_compressed)
         return constants;
 
-    const size_t scale_zp_size = data_type_traits::size_of(data_type) * 2;
+    const size_t scale_zp_bytes = sizeof(uint16_t) * 2;
+    const size_t scale_zp_elements = scale_zp_bytes / data_type_traits::size_of(data_type);
     if (is_by_channel) {
-        constants.adjusted_block_size += scale_zp_size;
+        constants.adjusted_block_size += scale_zp_elements;
         constants.scale_offset = block_size;
     } else {
-        constants.adjusted_head_size += scale_zp_size;
+        constants.adjusted_head_size += scale_zp_elements;
         constants.scale_offset = head_size * block_size;
     }
     constants.block_pitch = constants.adjusted_head_size * constants.adjusted_block_size;
@@ -240,8 +241,8 @@ JitConstants PagedAttentionGeneratorKVCacheUpdate::get_jit_constants(const kerne
     const bool is_compressed = get_kv_compressed(params);
     jit.make("KV_CACHE_COMPRESSION_PER_TOKEN", is_compressed ? 1 : 0);
 
-    const auto& key_layout = params.input_layouts[PagedAttentionInputIdx::KEY];
-    const auto& value_layout = params.input_layouts[PagedAttentionInputIdx::VALUE];
+    const auto& key_layout = params.input_layouts[PagedAttentionInputIdx::KEY_CACHE];
+    const auto& value_layout = params.input_layouts[PagedAttentionInputIdx::VALUE_CACHE];
     const auto key_consts = get_cache_layout_constants(desc->k_head_size,
                                                        block_size,
                                                        key_layout.data_type,
