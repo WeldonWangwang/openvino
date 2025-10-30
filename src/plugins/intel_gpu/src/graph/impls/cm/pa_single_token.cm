@@ -111,7 +111,13 @@ extern "C" _GENX_MAIN_ void KERNEL_NAME(
         cm_svm_block_read<half, Q_SLICE_NUM * HEAD_SIZE>((svmptr_t)(query + qo_offset), Qmat.format<half>());
     #endif
 
-    constexpr uint per_kv_block_element_num = KV_BLOCK_SIZE * KV_HEADS_NUM * (HEAD_SIZE + KV_SCALE_ZP_SIZE / sizeof(KV_ELEMENT_TYPE)); // 4 bytes: scale/zp
+    // Per-token layout: (HEAD_SIZE + 4) * KV_BLOCK_SIZE per kv_head
+    // Per-channel layout (IS_KEY_BY_CHANNEL): HEAD_SIZE * (KV_BLOCK_SIZE + 4) per kv_head
+    #ifdef IS_KEY_BY_CHANNEL
+    constexpr uint per_kv_block_element_num = KV_BLOCK_SIZE * KV_HEADS_NUM * HEAD_SIZE + KV_HEADS_NUM * HEAD_SIZE * 4; // scale/zp per channel (4 bytes)
+    #else
+    constexpr uint per_kv_block_element_num = KV_BLOCK_SIZE * KV_HEADS_NUM * (HEAD_SIZE + KV_SCALE_ZP_SIZE / sizeof(KV_ELEMENT_TYPE)); // scale/zp per token
+    #endif
     uint block_num = KV_PARTITION_SIZE / KV_BLOCK_SIZE;
 
     uint leftover_size = 0;
@@ -133,7 +139,7 @@ extern "C" _GENX_MAIN_ void KERNEL_NAME(
     for(uint block_idx = 0, ki = 0; block_idx < block_num; block_idx++) {
         uint blk_indices = block_indices[start_block_idx + block_idx];
         uint kv_base_offset = blk_indices * per_kv_block_element_num + kv_head_num_idx * (per_kv_block_element_num / KV_HEADS_NUM);
-        uint kv_scale_zp_offset = kv_base_offset + KV_BLOCK_SIZE * HEAD_SIZE; // scale/zp offset
+    uint kv_scale_zp_offset = kv_base_offset + KV_BLOCK_SIZE * HEAD_SIZE; // scale/zp offset (token or channel)
 
     #if USE_LSC_BLOCK_2D_DESC
         #if KV_CACHE_COMPRESSION
@@ -157,28 +163,46 @@ extern "C" _GENX_MAIN_ void KERNEL_NAME(
         }
 
         #if KV_CACHE_COMPRESSION
-            // load scale/zp
+            #ifdef IS_KEY_BY_CHANNEL
+            // Channel-wise scale/zp arrays length = HEAD_SIZE
+            vector<half, HEAD_SIZE> channel_scale_vec;
+            vector<half, HEAD_SIZE> channel_zp_vec;
+            cm_svm_block_read(reinterpret_cast<svmptr_t>(key + kv_scale_zp_offset), channel_scale_vec);
+            cm_svm_block_read(reinterpret_cast<svmptr_t>(key + kv_scale_zp_offset + HEAD_SIZE * sizeof(half)), channel_zp_vec);
+            #else
+            // Token-wise scale/zp length = KV_BLOCK_SIZE
             vector<half, KV_BLOCK_SIZE> scale_vec;
             vector<half, KV_BLOCK_SIZE> zp_vec;
             cm_svm_block_read(reinterpret_cast<svmptr_t>(key + kv_scale_zp_offset), scale_vec);
             cm_svm_block_read(reinterpret_cast<svmptr_t>(key + kv_scale_zp_offset + KV_BLOCK_SIZE * sizeof(half)), zp_vec);
             if(kv_pos_end < KV_BLOCK_SIZE) {
-                // fill leftover with last valid scale/zp
                 #pragma unroll
                 for(int i = kv_pos_end; i < KV_BLOCK_SIZE; i++) {
                     scale_vec[i] = 0.0;
                     zp_vec[i] = 0.0;
                 }
             }
+            #endif
         #endif
 
         for(int kv_pos = 0; kv_pos < kv_pos_end; kv_pos += KV_STEP, ki++) {
             #if KV_CACHE_COMPRESSION
+                #ifdef IS_KEY_BY_CHANNEL
+                // Per-channel: scale/zp independent of kv_pos; replicate channel values over REG_N columns.
+                vector<half, REG_N * 2> temp_scale, temp_zp;
+                for(int ci = 0; ci < REG_N; ci++) {
+                    temp_scale(ci) = channel_scale_vec(k + ci);
+                    temp_scale(ci + REG_N) = channel_scale_vec(k + ci);
+                    temp_zp(ci) = channel_zp_vec(k + ci);
+                    temp_zp(ci + REG_N) = channel_zp_vec(k + ci);
+                }
+                #else
                 vector<half, REG_N * 2> temp_scale, temp_zp;
                 temp_scale.select<REG_N,2>(0) = scale_vec.select<REG_N,1>(kv_pos);
                 temp_scale.select<REG_N,2>(1) = scale_vec.select<REG_N,1>(kv_pos);
                 temp_zp.select<REG_N,2>(0) = zp_vec.select<REG_N,1>(kv_pos);
                 temp_zp.select<REG_N,2>(1) = zp_vec.select<REG_N,1>(kv_pos);
+                #endif
             #endif
 
             #pragma unroll
@@ -208,8 +232,14 @@ extern "C" _GENX_MAIN_ void KERNEL_NAME(
 
                     #pragma unroll
                     for(int r = 0; r < REG_K; r++) {
-                        Kt[r] = Kt_quant[r] - temp_zp.format<half, 2, REG_N>()[r%2]; //vector - vector
-                        Kt[r] = cm_mul<half>(Kt[r], temp_scale.format<half, 2, REG_N>()[r%2]);    // vector * vector
+                        #ifdef IS_KEY_BY_CHANNEL
+                        // r%2 selects replicated row in temp_zp/temp_scale; channel already mapped by k offset
+                        Kt[r] = Kt_quant[r] - temp_zp.format<half, 2, REG_N>()[r%2];
+                        Kt[r] = cm_mul<half>(Kt[r], temp_scale.format<half, 2, REG_N>()[r%2]);
+                        #else
+                        Kt[r] = Kt_quant[r] - temp_zp.format<half, 2, REG_N>()[r%2];
+                        Kt[r] = cm_mul<half>(Kt[r], temp_scale.format<half, 2, REG_N>()[r%2]);
+                        #endif
                     }
                 #else
                     cm_load<lsc::Transpose>(Kt.format<uint>(), b2dK.set_block_y(kv_pos));

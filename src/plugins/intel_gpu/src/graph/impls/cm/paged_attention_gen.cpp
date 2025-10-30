@@ -189,15 +189,27 @@ JitConstants PagedAttentionGeneratorKVCacheUpdate::get_jit_constants(const kerne
     } else {
         jit.make("PAGED_ATTENTION_BLOCK_SIZE", PA_KV_CACHE_BLOCK_SIZE);
     }
-
-    if (get_kv_compressed(params)) {
-        jit.make("KV_CACHE_COMPRESSION_PER_TOKEN", 1);
-        jit.make("ADJUSTED_K_HEAD_SIZE", desc->k_head_size + 4);
+    // Compression layout handling
+    const bool kv_compressed = get_kv_compressed(params);
+    if (kv_compressed) {
+        jit.make("KV_CACHE_COMPRESSION_PER_TOKEN", 1); // compressed path enabled
+        if (desc->is_key_by_channel) {
+            // Per-channel key compression: block size expanded, head size unchanged
+            jit.make("IS_KEY_BY_CHANNEL", 1);
+            jit.make("ADJUSTED_K_HEAD_SIZE", desc->k_head_size);
+            jit.make("ADJUSTED_PAGED_ATTENTION_BLOCK_SIZE", (desc->has_xattention ? PA_KV_CACHE_BLOCK_SIZE_XATTN : PA_KV_CACHE_BLOCK_SIZE) + 4);
+        } else {
+            // Per-token key compression: head size expanded, block size unchanged
+            jit.make("ADJUSTED_K_HEAD_SIZE", desc->k_head_size + 4);
+            jit.make("ADJUSTED_PAGED_ATTENTION_BLOCK_SIZE", (desc->has_xattention ? PA_KV_CACHE_BLOCK_SIZE_XATTN : PA_KV_CACHE_BLOCK_SIZE));
+        }
+        // Value cache remains per-token compression
         jit.make("ADJUSTED_V_HEAD_SIZE", desc->v_head_size + 4);
     } else {
         jit.make("KV_CACHE_COMPRESSION_PER_TOKEN", 0);
         jit.make("ADJUSTED_K_HEAD_SIZE", desc->k_head_size);
         jit.make("ADJUSTED_V_HEAD_SIZE", desc->v_head_size);
+        jit.make("ADJUSTED_PAGED_ATTENTION_BLOCK_SIZE", (desc->has_xattention ? PA_KV_CACHE_BLOCK_SIZE_XATTN : PA_KV_CACHE_BLOCK_SIZE));
     }
 
     return jit;
@@ -345,8 +357,18 @@ JitConstants PagedAttentionGeneratorMultiToken::get_jit_constants(const kernel_i
 
     if (get_kv_compressed(params)) {
         jit.make("CMPA_KVCACHE_U8", 1);
+        if (desc->is_key_by_channel) {
+            jit.make("IS_KEY_BY_CHANNEL", 1);
+            jit.make("HEAD_SIZE_KEY", desc->k_head_size);
+            jit.make("ADJUSTED_PAGED_ATTENTION_BLOCK_SIZE", (desc->has_xattention ? PA_KV_CACHE_BLOCK_SIZE_XATTN : PA_KV_CACHE_BLOCK_SIZE) + 4);
+        } else {
+            jit.make("HEAD_SIZE_KEY", desc->k_head_size + 4);
+            jit.make("ADJUSTED_PAGED_ATTENTION_BLOCK_SIZE", (desc->has_xattention ? PA_KV_CACHE_BLOCK_SIZE_XATTN : PA_KV_CACHE_BLOCK_SIZE));
+        }
     } else {
         jit.make("CMPA_KVCACHE_U8", 0);
+        jit.make("HEAD_SIZE_KEY", desc->k_head_size);
+        jit.make("ADJUSTED_PAGED_ATTENTION_BLOCK_SIZE", (desc->has_xattention ? PA_KV_CACHE_BLOCK_SIZE_XATTN : PA_KV_CACHE_BLOCK_SIZE));
     }
     return jit;
 }
@@ -422,8 +444,18 @@ JitConstants PagedAttentionGeneratorSingleToken::get_jit_constants(const kernel_
 
     if (get_kv_compressed(params)) {
         jit.make("KV_CACHE_COMPRESSION", 1);
+        if (desc->is_key_by_channel) {
+            jit.make("IS_KEY_BY_CHANNEL", 1);
+            jit.make("HEAD_SIZE_KEY", desc->k_head_size);
+            jit.make("ADJUSTED_PAGED_ATTENTION_BLOCK_SIZE", (desc->has_xattention ? PA_KV_CACHE_BLOCK_SIZE_XATTN : PA_KV_CACHE_BLOCK_SIZE) + 4);
+        } else {
+            jit.make("HEAD_SIZE_KEY", desc->k_head_size + 4);
+            jit.make("ADJUSTED_PAGED_ATTENTION_BLOCK_SIZE", (desc->has_xattention ? PA_KV_CACHE_BLOCK_SIZE_XATTN : PA_KV_CACHE_BLOCK_SIZE));
+        }
     } else {
         jit.make("KV_CACHE_COMPRESSION", 0);
+        jit.make("HEAD_SIZE_KEY", desc->k_head_size);
+        jit.make("ADJUSTED_PAGED_ATTENTION_BLOCK_SIZE", (desc->has_xattention ? PA_KV_CACHE_BLOCK_SIZE_XATTN : PA_KV_CACHE_BLOCK_SIZE));
     }
 
     return jit;
