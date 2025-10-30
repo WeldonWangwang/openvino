@@ -136,7 +136,14 @@ extern "C" _GENX_MAIN_ void KERNEL_NAME(
  #endif
 
 #if CMPA_KVCACHE_U8
-    uint kv_offset = hkv*(head_size+4)*pa_block_sz;
+    // Adjust kv_offset stride for by-channel compression layout
+    #ifdef IS_KEY_BY_CHANNEL
+    // Per-channel: head_size * (block_size + 4)
+    uint kv_offset = hkv * head_size * (pa_block_sz + 4);
+    #else
+    // Per-token: (head_size + 4) * block_size
+    uint kv_offset = hkv * (head_size + 4) * pa_block_sz;
+    #endif
     pa_lsc_u8<is_causal, num_heads, num_kv_heads, head_size, 0>(
                             slm_K,
                             slm_V,

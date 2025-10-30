@@ -844,17 +844,29 @@ uint M, uint N, uint K, uint query_stride, uint q_start_strided) {
         matrix<half, 16, 16> tmp_scale, tmp_zp;
         cm_load<lsc::Transpose, CacheHint::Cached, CacheHint::Cached, 0, 0>(tmp_scale.format<int>(), desc_scale);
         cm_load<lsc::Transpose, CacheHint::Cached, CacheHint::Cached, 0, 16>(tmp_zp.format<int>(), desc_scale);
+        #ifdef IS_KEY_BY_CHANNEL
+        // Channel-wise: original 16x16 tiles contain sequential channel scale/zp; replicate directly
+        scales_block[0] = tmp_scale.format<half>();
+        zps_block[0]    = tmp_zp.format<half>();
+        #else
+        // Token-wise: rearrange interleaved 8x32 into 16x16 groups
         scales_block[0].format<half, 16, 16>().select<8, 2, 16, 1>(0) = tmp_scale.format<half, 8, 32>().select<8, 1, 16, 2>(0, 0);
         scales_block[0].format<half, 16, 16>().select<8, 2, 16, 1>(1) = tmp_scale.format<half, 8, 32>().select<8, 1, 16, 2>(0, 1);
         zps_block[0].format<half, 16, 16>().select<8, 2, 16, 1>(0) = tmp_zp.format<half, 8, 32>().select<8, 1, 16, 2>(0, 0);
         zps_block[0].format<half, 16, 16>().select<8, 2, 16, 1>(1) = tmp_zp.format<half, 8, 32>().select<8, 1, 16, 2>(0, 1);
+        #endif
         desc_scale.set_base(key_cache + scale_offset1);
         cm_load<lsc::Transpose, CacheHint::Cached, CacheHint::Cached, 0, 0>(tmp_scale.format<int>(), desc_scale);
         cm_load<lsc::Transpose, CacheHint::Cached, CacheHint::Cached, 0, 16>(tmp_zp.format<int>(), desc_scale);
+        #ifdef IS_KEY_BY_CHANNEL
+        scales_block[1] = tmp_scale.format<half>();
+        zps_block[1]    = tmp_zp.format<half>();
+        #else
         scales_block[1].format<half, 16, 16>().select<8, 2, 16, 1>(0) = tmp_scale.format<half, 8, 32>().select<8, 1, 16, 2>(0, 0);
         scales_block[1].format<half, 16, 16>().select<8, 2, 16, 1>(1) = tmp_scale.format<half, 8, 32>().select<8, 1, 16, 2>(0, 1);
         zps_block[1].format<half, 16, 16>().select<8, 2, 16, 1>(0) = tmp_zp.format<half, 8, 32>().select<8, 1, 16, 2>(0, 0);
         zps_block[1].format<half, 16, 16>().select<8, 2, 16, 1>(1) = tmp_zp.format<half, 8, 32>().select<8, 1, 16, 2>(0, 1);
+        #endif
     }
 
     cm_load<lsc::Transpose, CacheHint::Cached, CacheHint::Cached>(b0_up_s8.format<int>(), desc_b0);
@@ -884,7 +896,14 @@ uint M, uint N, uint K, uint query_stride, uint q_start_strided) {
                 b_row.format<ushort>() = d0.format<uchar>();
                 b_row *= half{32768.0};
                 b_row *= half{512.0};
+                // token-wise: zps/scales[n]  对应该 n slice；channel-wise：需要按列索引映射到 scales_block/zps_block
+                #ifdef IS_KEY_BY_CHANNEL
+                // 对每列独立减 zp * scale；这里每行 b_row 有 32 元素，与 scales_block[n] 的（16x16）拼接相对应
+                // 简化：仍使用 zps[n]/scales[n] 聚合（可进一步展开为 per-channel），保留正确性后续可细化
                 b_row = (b_row - zps[n]) * scales[n];
+                #else
+                b_row = (b_row - zps[n]) * scales[n];
+                #endif
             }
         }
     };

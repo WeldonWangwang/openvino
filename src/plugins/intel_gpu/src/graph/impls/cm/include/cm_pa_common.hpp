@@ -70,7 +70,14 @@ void pa_lsc_u8(
 
     lsc::block_2d_desc<uint8_t, 1, kv_step, REG_K> b2dK(k_cache_base, CMPA_BLOCK_SZ - 1, head_size*sizeof(uint8_t) - 1, kv_pitch - 1, 0, 0);
     lsc::block_2d_desc<uint8_t, 1, REG_K, REG_N> b2dV(v_cache_base, CMPA_BLOCK_SZ - 1, head_size*sizeof(uint8_t) - 1, kv_pitch - 1, 0, 0);
-    constexpr int quan_blk_stride = CMFLA_NUM_KV_HEADS * (CMFLA_HEAD_SIZE+4) * CMPA_BLOCK_SZ * sizeof(uint8_t);
+    // Stride of one quantized block across all kv heads:
+    // Per-token layout: (head_size + 4) * block_size bytes (4 = scale/zp per token)
+    // Per-channel layout (IS_KEY_BY_CHANNEL): head_size * (block_size + 4) bytes (4 = scale/zp per channel)
+    #ifdef IS_KEY_BY_CHANNEL
+    constexpr int quan_blk_stride = CMFLA_NUM_KV_HEADS * CMFLA_HEAD_SIZE * (CMPA_BLOCK_SZ + 4) * sizeof(uint8_t);
+    #else
+    constexpr int quan_blk_stride = CMFLA_NUM_KV_HEADS * (CMFLA_HEAD_SIZE + 4) * CMPA_BLOCK_SZ * sizeof(uint8_t);
+    #endif
     int causal_left = q_start+past_lens;
 
     constexpr uint slm_buff_size = kv_step * head_size * sizeof(half);
@@ -102,8 +109,16 @@ void pa_lsc_u8(
             }
 #endif
             auto cur_block_id = block_indices[kv_pos / CMPA_BLOCK_SZ];
-            uint32_t dscale_offset = cur_block_id*quan_blk_stride + \
-                        CMPA_BLOCK_SZ * head_size * sizeof(uint8_t) + kv_pos%CMPA_BLOCK_SZ*sizeof(half);
+            uint32_t dscale_offset;
+            #ifdef IS_KEY_BY_CHANNEL
+                // Scale/zp per channel: base after all token bytes of all channels in this head
+                // For channel loads we will iterate channels; here we load token slice then later apply channel scale/zp fetched once.
+                dscale_offset = cur_block_id * quan_blk_stride + head_size * CMPA_BLOCK_SZ * sizeof(uint8_t);
+            #else
+                // Per-token scale/zp segment with offset per kv_pos
+                dscale_offset = cur_block_id * quan_blk_stride + \
+                                CMPA_BLOCK_SZ * head_size * sizeof(uint8_t) + (kv_pos % CMPA_BLOCK_SZ) * sizeof(half);
+            #endif
 
             uint slm_offset = (slm_buff_id_write & 3) * slm_buff_size;
             vector<half, kv_step> dscale;
@@ -112,8 +127,25 @@ void pa_lsc_u8(
 
             slm_buff_id_write ++;
             if (wg_local_id < local_size/2) {
+                #ifdef IS_KEY_BY_CHANNEL
+                // Prefetch full per-channel scale and zero-point arrays into private memory
+                // Layout: [scale(head_size)][zp(head_size)]
+                vector<half, CMFLA_HEAD_SIZE> channel_scale_arr;
+                vector<half, CMFLA_HEAD_SIZE> channel_zp_arr;
+                // Load scale array in REG_K chunks
+                for(int off = 0; off < head_size; off += REG_K) {
+                    int chunk = (head_size - off) > REG_K ? REG_K : (head_size - off);
+                    // Use svm_block_read for contiguous half elements; read chunk as bytes
+                    cm_svm_block_read(reinterpret_cast<svmptr_t>(k_cache_base + dscale_offset + off * sizeof(half)), channel_scale_arr.select<REG_K,1>(off));
+                }
+                for(int off = 0; off < head_size; off += REG_K) {
+                    int chunk = (head_size - off) > REG_K ? REG_K : (head_size - off);
+                    cm_svm_block_read(reinterpret_cast<svmptr_t>(k_cache_base + dscale_offset + head_size * sizeof(half) + off * sizeof(half)), channel_zp_arr.select<REG_K,1>(off));
+                }
+                #else
                 cm_svm_block_read(reinterpret_cast<svmptr_t>( k_cache_base + dscale_offset), dscale);
                 cm_svm_block_read(reinterpret_cast<svmptr_t>( k_cache_base + dscale_offset + CMPA_BLOCK_SZ*sizeof(half)), zp);
+                #endif
 
                 matrix<half, kv_step, REG_K> kmat;
                 auto quanKmat = kmat.format<half, 2, kv_step * REG_K/2>()[1].format<uint8_t, kv_step, REG_K>();
@@ -132,8 +164,15 @@ void pa_lsc_u8(
                     */
                     #pragma unroll
                     for(int r = 0; r < kv_step; r++)  {
+                        #ifdef IS_KEY_BY_CHANNEL
+                        half channel_scale = channel_scale_arr(k);
+                        half channel_zp    = channel_zp_arr(k);
+                        kmat[r] = quanKmat[r] - channel_zp;
+                        kmat[r] = cm_mul<half>(kmat[r], channel_scale);
+                        #else
                         kmat[r] =  quanKmat[r]-zp[r];
                         kmat[r] = cm_mul<half>(kmat[r], dscale[r]);
+                        #endif
                     }
                     //clear unused data to 0.
                     for(int r = kv_step-1; r >= kv_left; r--)

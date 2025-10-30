@@ -83,9 +83,19 @@ extern "C" _GENX_MAIN_ void KERNEL_NAME(
     uint id_wg_m, id_wg_n;
     get_mn(id_wg_m, id_wg_n, M, N, slice_no, slice, BLOCK_WG_M, BLOCK_WG_N);
 
-    // key cache: [block, HQ, KV_BLOCK_SIZE, HEAD_SIZE_KEY]
+    // key cache layout with compression:
+    // BY_TOKEN: (HEAD_SIZE_KEY + 4) * KV_BLOCK_SIZE bytes (4 = scale/zp token-wise half2)
+    // BY_CHANNEL: HEAD_SIZE_KEY * (KV_BLOCK_SIZE + 4) bytes (4 = scale/zp channel-wise half2)
+    // Uncompressed: KV_BLOCK_SIZE * HEAD_SIZE_KEY * sizeof(half)
 #if USE_INT8
-    key_cache += hk * (KV_BLOCK_SIZE * HEAD_SIZE_KEY * (uint)sizeof(char));
+    #ifdef IS_KEY_BY_CHANNEL
+        const uint KEY_BLOCK_STRIDE = HEAD_SIZE_KEY * (KV_BLOCK_SIZE + 4); // bytes
+        const uint SCALEZP_OFFSET   = KV_BLOCK_SIZE * HEAD_SIZE_KEY;       // position of channel scale/zp region
+    #else
+        const uint KEY_BLOCK_STRIDE = (HEAD_SIZE_KEY + 4) * KV_BLOCK_SIZE; // bytes
+        const uint SCALEZP_OFFSET   = KV_BLOCK_SIZE * HEAD_SIZE_KEY;       // token scale/zp region
+    #endif
+    key_cache += hk * KEY_BLOCK_STRIDE;
 #else
     key_cache += hk * (KV_BLOCK_SIZE * HEAD_SIZE_KEY * (uint)sizeof(half));
 #endif
@@ -107,6 +117,8 @@ extern "C" _GENX_MAIN_ void KERNEL_NAME(
 #define CONCAT_IMPL(a, b) gemm_qk_ ##a ##x ##b ##_xe2
 #define CONCAT(x, y) CONCAT_IMPL(x, y)
 #define FUNC CONCAT(BLOCK_SG_M, BLOCK_SG_N)
+    // Dequantization handling for INT8 path will be done inside specialized gemm function if it references key_cache.
+    // Provide additional pointers for scale/zp if needed by function template (extend signature if required).
     FUNC(id_wg_m, id_wg_n, hq, slm, key_cache, query, block_indices, block_indices_begins, kq_max_wg, kq_exp_partial_sum, M, N, K, query_stride, q_start_strided);
 }
 
