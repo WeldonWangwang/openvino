@@ -4,23 +4,312 @@
 
 #include "paged_attention.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
+#include <fstream>
+#include <iomanip>
 #include <memory>
+#include <regex>
+#include <set>
+#include <sstream>
 #include <utility>
 
 #include "common_utils/jitter.hpp"
 #include "common_utils/kernel_generator_base.hpp"
 #include "intel_gpu/graph/kernel_impl_params.hpp"
 #include "intel_gpu/primitives/paged_attention.hpp"
+#include "intel_gpu/runtime/execution_config.hpp"
 #include "kv_cache_inst.h"
 #include "openvino/core/partial_shape.hpp"
+#include "openvino/util/file_util.hpp"
 #include "paged_attention_gen.hpp"
 #include "paged_attention_inst.h"
 #include "primitive_cm_base.hpp"
 #include "primitive_inst.h"
+#include "to_string_utils.h"
 
 namespace ov::intel_gpu::cm {
+
+#ifdef GPU_DEBUG_CONFIG
+namespace {
+
+float convert_element(int64_t i) { return static_cast<float>(i); }
+float convert_element(int32_t i) { return static_cast<float>(i); }
+float convert_element(float f) { return f; }
+float convert_element(ov::float16 h) { return static_cast<float>(h); }
+
+size_t get_x_pitch(const cldnn::layout& layout) {
+    try {
+        auto tensor_x0 = cldnn::tensor(cldnn::batch(0), cldnn::feature(0), cldnn::spatial(0, 0, 0, 0));
+        auto tensor_x1 = cldnn::tensor(cldnn::batch(0), cldnn::feature(0), cldnn::spatial(1, 0, 0, 0));
+        auto x0 = layout.get_linear_offset(tensor_x0);
+        auto x1 = layout.get_linear_offset(tensor_x1);
+        return (x1 - x0);
+    } catch (...) {
+        // When spatial size of x=0, x_pitch is meaningless.
+        return 0;
+    }
+}
+
+template <class T>
+void dump(cldnn::memory::ptr mem, cldnn::stream& stream, std::ofstream& file_stream, bool dump_raw) {
+    auto&& size = mem->get_layout().get_tensor();
+
+    auto batch_size =
+        std::max<ov::Dimension::value_type>(std::min<ov::Dimension::value_type>(cldnn::ExecutionConfig::get_dump_batch_limit(), size.batch[0]), 1);
+    cldnn::tensor tmp_size(size);
+    tmp_size.batch[0] = batch_size;
+    if (tmp_size == size) {
+        file_stream << "shape: " << size.to_string() << " ";
+        file_stream << "(count: " << size.count() << ", addr: " << mem->buffer_ptr()
+                    << ", original format: " << cldnn::fmt_to_str(mem->get_layout().format) << ")"
+                    << (dump_raw ? " raw data" : "") << std::endl;
+    } else {
+        file_stream << "shape: " << tmp_size.to_string() << " ";
+        file_stream << "(count: " << tmp_size.count() << ", addr: " << mem->buffer_ptr()
+                    << ", original format: " << cldnn::fmt_to_str(mem->get_layout().format) << ", original shape: " << size.to_string() << ")"
+                    << (dump_raw ? " raw data" : "") << std::endl;
+    }
+
+    if (size.count() == 0) {
+        file_stream << "Empty buffer" << std::endl;
+        return;
+    }
+
+    cldnn::mem_lock<T, cldnn::mem_lock_type::read> lock(mem, stream);
+    auto mem_ptr = lock.data();
+    auto x_pitch = get_x_pitch(mem->get_layout());
+    std::stringstream buffer;
+
+    if (!dump_raw) {
+        for (ov::Dimension::value_type g = 0; g < size.group[0]; ++g) {
+            for (ov::Dimension::value_type b = 0; b < batch_size; ++b) {
+                for (ov::Dimension::value_type f = 0; f < size.feature[0]; ++f) {
+                    for (ov::Dimension::value_type w = 0; w < size.spatial[3]; ++w) {
+                        for (ov::Dimension::value_type z = 0; z < size.spatial[2]; ++z) {
+                            for (ov::Dimension::value_type y = 0; y < size.spatial[1]; ++y) {
+                                cldnn::tensor t(cldnn::group(g), cldnn::batch(b), cldnn::feature(f), cldnn::spatial(0, y, z, w));
+                                size_t input_it = mem->get_layout().get_linear_offset(t);
+
+                                for (ov::Dimension::value_type x = 0; x < size.spatial[0]; ++x, input_it += x_pitch) {
+                                    buffer << std::fixed << std::setprecision(6) << convert_element(mem_ptr[input_it]) << std::endl;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        for (size_t i = 0; i < lock.size(); ++i) {
+            buffer << std::fixed << std::setprecision(6) << convert_element(mem_ptr[i]) << std::endl;
+        }
+    }
+    file_stream << buffer.str();
+}
+
+void unpack(cldnn::data_types type, uint8_t input, int8_t& v0, int8_t& v1) {
+    if (type == cldnn::data_types::i4) {
+        char s_bit = (input & 0x08);
+        char mask = s_bit > 0 ? 0xF0 : 0x00;
+        v0 = (input & 0x0F) | mask;
+
+        input >>= 4;
+        s_bit = (input & 0x08);
+        mask = s_bit > 0 ? 0xF0 : 0x00;
+        v1 = (input & 0x0F) | mask;
+    } else if (type == cldnn::data_types::u4) {
+        v0 = input & 0x0F;
+        v1 = input >> 4;
+    } else {
+        OPENVINO_ASSERT(false, "not supported unpacking");
+    }
+}
+
+void dump_i4u4(cldnn::data_types type, cldnn::memory::ptr mem, cldnn::stream& stream, std::ofstream& file_stream, bool dump_raw) {
+    auto&& size = mem->get_layout().get_tensor();
+
+    auto batch_size =
+        std::max<ov::Dimension::value_type>(std::min<ov::Dimension::value_type>(cldnn::ExecutionConfig::get_dump_batch_limit(), size.batch[0]), 1);
+    cldnn::tensor tmp_size(size);
+    tmp_size.batch[0] = batch_size;
+    if (tmp_size == size) {
+        file_stream << "shape: " << size.to_string() << " ";
+        file_stream << "(count: " << size.count() << ", original format: " << cldnn::fmt_to_str(mem->get_layout().format) << ")"
+                    << (dump_raw ? " raw data" : "") << std::endl;
+    } else {
+        file_stream << "shape: " << tmp_size.to_string() << " ";
+        file_stream << "(count: " << tmp_size.count() << ", original format: " << cldnn::fmt_to_str(mem->get_layout().format)
+                    << ", original shape: " << size.to_string() << ")"
+                    << (dump_raw ? " raw data" : "") << std::endl;
+    }
+
+    if (size.count() == 0) {
+        file_stream << "Empty buffer" << std::endl;
+        return;
+    }
+
+    cldnn::mem_lock<uint8_t, cldnn::mem_lock_type::read> lock(mem, stream);
+    auto mem_ptr = lock.data();
+    std::stringstream buffer;
+
+    if (dump_raw) {
+        for (size_t i = 0; i < lock.size(); ++i) {
+            int8_t v0, v1;
+            unpack(type, mem_ptr[i], v0, v1);
+            buffer << std::fixed << std::setprecision(6) << static_cast<int>(v0) << std::endl;
+            buffer << std::fixed << std::setprecision(6) << static_cast<int>(v1) << std::endl;
+        }
+    } else {
+        GPU_DEBUG_COUT << " supports raw dump only" << std::endl;
+    }
+    file_stream << buffer.str();
+}
+
+std::string get_name_for_dump(const std::string& file_name) {
+    std::string filename = file_name;
+    std::replace(filename.begin(), filename.end(), '\\', '_');
+    std::replace(filename.begin(), filename.end(), '/', '_');
+    std::replace(filename.begin(), filename.end(), ' ', '_');
+    std::replace(filename.begin(), filename.end(), ':', '_');
+    return filename;
+}
+
+void log_memory_to_file(cldnn::memory::ptr mem, cldnn::layout data_layout, cldnn::stream& stream, const std::string& filename, bool dump_raw) {
+    std::ofstream file_stream(filename);
+    if (!mem) {
+        file_stream << "Empty" << std::endl;
+        return;
+    }
+
+    auto actual_mem = mem->get_engine()->reinterpret_buffer(*mem, data_layout);
+
+    auto mem_dt = actual_mem->get_layout().data_type;
+    if (mem_dt == cldnn::data_types::f32)
+        dump<float>(actual_mem, stream, file_stream, dump_raw);
+    else if (mem_dt == cldnn::data_types::f16)
+        dump<ov::float16>(actual_mem, stream, file_stream, dump_raw);
+    else if (mem_dt == cldnn::data_types::i64)
+        dump<int64_t>(actual_mem, stream, file_stream, dump_raw);
+    else if (mem_dt == cldnn::data_types::i32)
+        dump<int32_t>(actual_mem, stream, file_stream, dump_raw);
+    else if (mem_dt == cldnn::data_types::i8)
+        dump<int8_t>(actual_mem, stream, file_stream, dump_raw);
+    else if (mem_dt == cldnn::data_types::u8)
+        dump<uint8_t>(actual_mem, stream, file_stream, dump_raw);
+    else if (mem_dt == cldnn::data_types::boolean)
+        dump<uint8_t>(actual_mem, stream, file_stream, dump_raw);
+    else if (mem_dt == cldnn::data_types::i4 || mem_dt == cldnn::data_types::u4)
+        dump_i4u4(mem_dt, actual_mem, stream, file_stream, dump_raw);
+    else
+        GPU_DEBUG_COUT << "Dump for this data type is not supported: " << dt_to_str(mem_dt) << std::endl;
+}
+
+std::string get_file_path_for_binary_dump(cldnn::layout layout, const std::string& name, const std::string& dump_layers_path) {
+    std::string filename;
+    std::string data_type = ov::element::Type(layout.data_type).get_type_name();
+    std::string format = layout.format.to_string();
+    std::string tensor;
+    auto dims = layout.get_dims();
+    for (size_t r = 0; r < layout.get_rank(); r++) {
+        tensor += ("_" + to_string(dims[r]));
+    }
+
+    std::string layer_name = get_name_for_dump(name);
+    filename = dump_layers_path + layer_name + "__" + data_type + "_" + tensor + "__" + format + ".bin";
+    return filename;
+}
+
+bool is_target_iteration(int64_t iteration, const std::set<int64_t>& dump_iteration) {
+    if (iteration < 0)
+        return true;
+
+    if (dump_iteration.empty())
+        return true;
+
+    if (dump_iteration.find(iteration) == std::end(dump_iteration))
+        return false;
+
+    return true;
+}
+
+bool is_layer_name_matched(const std::string& layer_name, const std::string& pattern) {
+    auto upper_layer_name = std::string(layer_name.length(), '\0');
+    std::transform(layer_name.begin(), layer_name.end(), upper_layer_name.begin(), ::toupper);
+    auto upper_pattern = std::string(pattern.length(), '\0');
+    std::transform(pattern.begin(), pattern.end(), upper_pattern.begin(), ::toupper);
+
+    size_t pos = upper_layer_name.find(':');
+    auto upper_exec_graph_name = upper_layer_name.substr(pos + 1, upper_layer_name.size());
+    if (upper_exec_graph_name.compare(upper_pattern) == 0) {
+        return true;
+    }
+
+    std::regex re(upper_pattern);
+    return std::regex_match(upper_layer_name, re);
+}
+
+bool is_layer_for_dumping(const cldnn::ExecutionConfig& config, const std::string& layer_name) {
+    const auto& dump_layers = config.get_dump_layer_names();
+    if (dump_layers.empty())
+        return true;
+
+    auto iter = std::find_if(dump_layers.begin(), dump_layers.end(), [&](const std::string& dl) {
+        return is_layer_name_matched(layer_name, dl);
+    });
+    return (iter != dump_layers.end());
+}
+
+std::string get_file_prefix(const cldnn::primitive_inst& instance) {
+    auto prog = instance.get_network().get_program().get();
+    auto prog_id = ((prog != nullptr) ? prog->get_id() : 0);
+    auto net_id = instance.get_network().get_id();
+    auto iter = instance.get_network().get_current_iteration_num();
+    auto iteration_prefix = iter < 0 ? std::string("") : std::to_string(iter) + "_";
+
+    return "program" + std::to_string(prog_id) + "_network" + std::to_string(net_id) + "_" + iteration_prefix + instance.id();
+}
+
+void dump_updated_src_after_exec(const cldnn::primitive_inst& instance) {
+    const auto& config = instance.get_config();
+    if (config.get_dump_tensors_path().empty() || !config.get_dump_src_after_exec())
+        return;
+
+    if (!is_target_iteration(instance.get_network().get_current_iteration_num(), config.get_dump_iterations()))
+        return;
+
+    const std::string layer_name = instance.id();
+    if (config.get_dump_tensors() == ov::intel_gpu::DumpTensors::in || !is_layer_for_dumping(config, layer_name))
+        return;
+
+    auto& stream = instance.get_network().get_stream();
+    stream.finish();
+    for (size_t i = 0; i < instance.inputs_memory_count(); i++) {
+        std::string name = get_file_prefix(instance) + "_updated_src_" + std::to_string(i);
+        auto output_mem = instance.input_memory_ptr(i);
+        if (output_mem == nullptr) {
+            GPU_DEBUG_COUT << " updated_input_mem is nullptr. Nothing to dump." << std::endl;
+            continue;
+        }
+
+        auto& output_layout = instance.get_input_layout(i);
+        if (config.get_dump_tensors_format() == ov::intel_gpu::DumpFormat::binary) {
+            auto filename = get_file_path_for_binary_dump(output_layout, name, config.get_dump_tensors_path());
+
+            cldnn::mem_lock<char, cldnn::mem_lock_type::read> lock(output_mem, stream);
+            ov::util::save_binary(filename, lock.data(), output_mem->size());
+            GPU_DEBUG_COUT << " Dump layer dst : " << layer_name << " to " << filename << std::endl;
+        } else {
+            const bool dump_raw = config.get_dump_tensors_format() == ov::intel_gpu::DumpFormat::text_raw;
+            GPU_DEBUG_COUT << " Dump " << (dump_raw ? "raw " : "") << name << std::endl;
+            auto filename = config.get_dump_tensors_path() + get_name_for_dump(name) + ".txt";
+            log_memory_to_file(output_mem, output_layout, stream, filename, dump_raw);
+        }
+    }
+}
+}  // namespace
+#endif  // GPU_DEBUG_CONFIG
 
 class PagedAttentionCmImpl : public PrimitiveImplCM {
 public:
@@ -145,6 +434,9 @@ public:
             res_event = {execute_stage(res_event, instance, pa_single_token)};
             res_event = {execute_stage(res_event, instance, pa_single_token_finalization)};
         }
+#ifdef GPU_DEBUG_CONFIG
+        dump_updated_src_after_exec(instance);
+#endif
         return res_event[0];
     }
 
