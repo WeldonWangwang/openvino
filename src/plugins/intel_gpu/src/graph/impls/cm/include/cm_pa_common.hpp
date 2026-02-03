@@ -21,6 +21,10 @@
 #define USE_LSC 0
 #endif
 
+#ifndef CM_PA_SPARSE_MASK_OPT
+#define CM_PA_SPARSE_MASK_OPT 1
+#endif
+
 #if CMPA_KVCACHE_U8
 template<bool use_causal_mask, int num_heads, int num_kv_heads, int head_size, int is_q_fused = 0>
 void pa_lsc_u8(
@@ -122,21 +126,70 @@ void pa_lsc_u8(
     constexpr uint slm_buff_size = kv_step * head_size * sizeof(half);
     int slm_buff_id_write = 0;
     int slm_buff_id_read = 0;
+    int kv_stop_runtime = kv_stop;
+    bool has_any_compute = false;
 
 #if IS_BLOCK_SPARSE
-    const int sb_shift = (SPARSE_BLOCK_SIZE == 128) ? 7 : (SPARSE_BLOCK_SIZE == 256) ? 8 : -1;
+    // Sparse mask is indexed by kv_start_block = kv_pos / SPARSE_BLOCK_SIZE.
+    // SPARSE_BLOCK_SIZE is expected to be {64,128,256} for xattn; use shifts + per-block caching
+    // to avoid expensive per-iteration divides and global memory reads.
+    uint sparse_shift = 0;
+    if (SPARSE_BLOCK_SIZE == 64) {
+        sparse_shift = 6;
+    } else if (SPARSE_BLOCK_SIZE == 128) {
+        sparse_shift = 7;
+    } else if (SPARSE_BLOCK_SIZE == 256) {
+        sparse_shift = 8;
+    }
 
-    auto skip_by = [&](const bool* base, int kv_pos) -> bool {
-        if (sb_shift < 0) return false;
-        return !base[(uint)kv_pos >> sb_shift];
+    auto kv_to_sparse_block = [&](int kv_pos) -> uint {
+        if (sparse_shift != 0) {
+            return (uint)kv_pos >> sparse_shift;
+        }
+        return (uint)(kv_pos / SPARSE_BLOCK_SIZE);
     };
 
-    auto skip_compute = [&](int kv_pos) { return skip_by((const bool*)sparse_mask_base, kv_pos); };
-    auto skip_load    = [&](int kv_pos) { return skip_by((const bool*)wg_sparse_mask_base, kv_pos); };
+    #if CM_PA_SPARSE_MASK_OPT
+    // Cache skip_load decision per sparse block (wg-level merged mask; uniform across threads).
+    uint cached_wg_blk = 0xFFFFFFFFu;
+    bool cached_wg_active = true;
+    auto skip_load = [&](int kv_pos) {
+        uint kv_start_block = kv_to_sparse_block(kv_pos);
+        if (kv_start_block != cached_wg_blk) {
+            cached_wg_blk = kv_start_block;
+            cached_wg_active = *(reinterpret_cast<bool*>(wg_sparse_mask_base) + kv_start_block);
+        }
+        return !cached_wg_active;
+    };
+
+    // Cache skip_compute decision per sparse block (q-block mask; may differ across threads).
+    uint cached_q_blk = 0xFFFFFFFFu;
+    bool cached_q_active = true;
+    auto skip_compute = [&](int kv_pos) {
+        uint kv_start_block = kv_to_sparse_block(kv_pos);
+        if (kv_start_block != cached_q_blk) {
+            cached_q_blk = kv_start_block;
+            cached_q_active = *(reinterpret_cast<bool*>(sparse_mask_base) + kv_start_block);
+        }
+        return !cached_q_active;
+    };
+    #else
+    // No caching: read mask directly.
+    auto skip_load = [&](int kv_pos) {
+        uint kv_start_block = kv_to_sparse_block(kv_pos);
+        bool sparse_mask = *(reinterpret_cast<bool*>(wg_sparse_mask_base) + kv_start_block);
+        return !sparse_mask;
+    };
+    auto skip_compute = [&](int kv_pos) {
+        uint kv_start_block = kv_to_sparse_block(kv_pos);
+        bool sparse_mask = *(reinterpret_cast<bool*>(sparse_mask_base) + kv_start_block);
+        return !sparse_mask;
+    };
+    #endif
 #endif
 
     auto load_slm_KV = [&](int kv_pos) {
-        if (kv_pos < kv_stop) {
+        if (kv_pos < kv_stop_runtime) {
 #if IS_BLOCK_SPARSE
             if (SPARSE_BLOCK_SIZE > 1 && skip_load(kv_pos)) {
                 slm_buff_id_write++;
@@ -150,7 +203,7 @@ void pa_lsc_u8(
             uint slm_offset = (slm_buff_id_write & 3) * slm_buff_size;
             vector<half, kv_step> dscale;
             vector<half, kv_step> zp;
-            int kv_left =  (kv_stop-kv_pos) > kv_step ? kv_step: (kv_stop-kv_pos);
+            int kv_left =  (kv_stop_runtime-kv_pos) > kv_step ? kv_step: (kv_stop_runtime-kv_pos);
 
             slm_buff_id_write ++;
             if (wg_local_id < local_size/2) {
@@ -238,12 +291,17 @@ void pa_lsc_u8(
         }
     };
 
-    load_slm_KV(0);
-    load_slm_KV(kv_step);
-    cm_slm_fence(CM_LOCAL_BARRIER);
-    cm_sbarrier(1);
+    auto run_kv_range = [&](int range_start, int range_stop) {
+        kv_stop_runtime = range_stop;
+        slm_buff_id_write = 0;
+        slm_buff_id_read = 0;
 
-    for(int kv_pos = 0; kv_pos < kv_stop; kv_pos += kv_step,slm_buff_id_read++) {
+        load_slm_KV(range_start);
+        load_slm_KV(range_start + kv_step);
+        cm_slm_fence(CM_LOCAL_BARRIER);
+        cm_sbarrier(1);
+
+        for (int kv_pos = range_start; kv_pos < kv_stop_runtime; kv_pos += kv_step, slm_buff_id_read++) {
 
         //  load0, load1, signal1,
         //  [wait1, signal2, load2, read0, compute0]
@@ -260,7 +318,7 @@ void pa_lsc_u8(
         cm_fence(CM_LOCAL_BARRIER);
         cm_sbarrier(0);
         //if (kv_pos > 1024000)
-        if (kv_pos + kv_step < kv_stop)
+        if (kv_pos + kv_step < kv_stop_runtime)
             cm_sbarrier(1);
         load_slm_KV(kv_pos + kv_step*2);
 
@@ -304,7 +362,7 @@ void pa_lsc_u8(
                 #endif
                 causal_left -= kv_step;
             } else {
-                int kv_tokens = kv_stop - kv_pos;
+                int kv_tokens = kv_stop_runtime - kv_pos;
                 // LSC ensures no overflow-access, but mask off k-tails attn-score is still required
                 for(int p = kv_tokens; p < kv_step; p++) St[p] = -3.4e38f;
             }
@@ -313,14 +371,80 @@ void pa_lsc_u8(
             matrix<half, REG_N, REG_K> P;
             Transpose2DMatrix(St, P);
 
-            if (kv_pos == 0)
+            if (!has_any_compute) {
                 ugemm_PV0(slm_V, P, rO, slm_offset);
-            else
+                has_any_compute = true;
+            } else {
                 ugemm_PV1(slm_V, P, max_comp, rO, slm_offset);
+            }
         }
     }
+    };
+
+#if IS_BLOCK_SPARSE && CM_PA_SPARSE_MASK_OPT
+    // If WG-merged mask contains inactive sparse blocks, skip them at block granularity to avoid
+    // paying per-kv_step barriers on fully-masked regions.
+    bool use_sparse_block_skip = false;
+    if (SPARSE_BLOCK_SIZE > 1 && sparse_shift != 0 && kv_stop >= SPARSE_BLOCK_SIZE) {
+        const uint num_sparse_blocks = (uint)((kv_stop + SPARSE_BLOCK_SIZE - 1) / SPARSE_BLOCK_SIZE);
+        const uint samples = 8u;
+        for (uint s = 0; s < samples && s < num_sparse_blocks; s++) {
+            uint blk = (s * num_sparse_blocks) / samples;
+            if (!*(reinterpret_cast<bool*>(wg_sparse_mask_base) + blk)) {
+                use_sparse_block_skip = true;
+                break;
+            }
+        }
+    }
+
+    if (use_sparse_block_skip) {
+        for (int blk_start = 0; blk_start < kv_stop; blk_start += SPARSE_BLOCK_SIZE) {
+            const int blk_end = (blk_start + SPARSE_BLOCK_SIZE < kv_stop) ? (blk_start + SPARSE_BLOCK_SIZE) : kv_stop;
+            // Use WG mask (merged) to skip whole blocks.
+            if (skip_load(blk_start)) {
+                if constexpr (use_causal_mask)
+                    causal_left -= (blk_end - blk_start);
+                continue;
+            }
+            run_kv_range(blk_start, blk_end);
+        }
+    } else
+#endif
+    {
+        run_kv_range(0, kv_stop);
+    }
+
     // cm_sbarrier(0);
     if (q_tokens_left == 0) return;
+
+    // If everything was masked out, produce zeros instead of using uninitialized accumulators.
+    if (!has_any_compute) {
+        #if USE_LSC
+        lsc::block_2d_desc<half, 1, REG_M, REG_N> b2dO(o_base, q_tokens_left - 1, head_size*sizeof(half) - 1, o_pitch - 1, 0, 0);
+        #endif
+        matrix<half, num_P_tiles*REG_M, REG_N> z = 0;
+        #pragma unroll
+        for(int k = 0, ri=0; k < head_size; k += REG_N, ri += num_P_tiles) {
+            #if USE_LSC
+            b2dO.set_block_x(k);
+            #endif
+            #pragma unroll
+            for(int p = 0; p < num_P_tiles; p++) {
+                #if USE_LSC
+                cm_store(b2dO.set_block_y(p * REG_M), z.format<half, num_P_tiles, REG_M * REG_N>().row(p));
+                #else
+                int o_stride_elems = o_pitch / sizeof(half);
+                half* output_ptr = (half*)o_base + p * REG_M * o_stride_elems + k;
+                auto zref = z.format<half, num_P_tiles, REG_M * REG_N>().row(p).format<half, REG_M, REG_N>();
+                #pragma unroll
+                for (int r = 0; r < REG_M; r++) {
+                    cm_svm_block_write<half, REG_N>((svmptr_t)(output_ptr + r * o_stride_elems), zref.row(r).format<half>());
+                }
+                #endif
+            }
+        }
+        return;
+    }
 
     //# save cur_O/cur_sum.transpose(0, 1)
     matrix<half, num_P_tiles*REG_M, REG_N> cur_O_f16;
