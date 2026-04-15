@@ -307,7 +307,6 @@ void sdpa_kernel_lsc(
         #pragma unroll
         for(int k = 0, ri = 0; k < padded_head_size/2; k += REG_K/2, ri++) {
             cm_load<lsc::Transpose>(rQ[ri].format<uint>(), b2dQ.set_block_x(k));
-            rQ[ri].format<half>() = cm_mul<half>(rQ[ri].format<half>(), (half)scale_factor);
         }
     }
 
@@ -375,6 +374,8 @@ void sdpa_kernel_lsc(
             uint slm_offset = (slm_buff_id_read & 3) * slm_buff_size;
             //# St = k @ Qt
             matrix<float, kv_step, q_step> St = ugemm_KQ(slm_K, rQ, slm_offset);
+            // Post-scale QK scores in fp32 (avoids (half)scale_factor truncation)
+            St = cm_mul<float>(St, (float)scale_factor);
 
             if constexpr (use_causal_mask) {
                 // since kv_step == q_step == 16, causal_left is n*kv_step
@@ -467,7 +468,6 @@ void sdpa_kernel_lsc_prefetch(
         #pragma unroll
         for(int k = 0, ri = 0; k < padded_head_size/2; k += REG_K/2, ri++) {
             cm_load<lsc::Transpose>(rQ[ri].format<uint>(), b2dQ.set_block_x(k));
-            rQ[ri].format<half>() = cm_mul<half>(rQ[ri].format<half>(), (half)scale_factor);
         }
     }
 
@@ -517,6 +517,8 @@ void sdpa_kernel_lsc_prefetch(
                 }
             }
         }
+        // Post-scale QK scores in fp32 (avoids (half)scale_factor truncation)
+        St = cm_mul<float>(St, (float)scale_factor);
         if constexpr (use_causal_mask) {
             // since kv_step == q_step == 16, causal_left is n*kv_step
             if (causal_left == 0) {
@@ -658,7 +660,6 @@ void sdpa_kernel(
             #pragma unroll
             for(int k = 0, ri = 0; k < head_size/2; k += REG_K/2, ri++) {
                 Transpose2DMatrix(QmatI32.select<q_step, 1, REG_K/2, 1>(0, k), rQ[ri].format<uint, REG_K/2, q_step>());
-                rQ[ri].format<half>() = cm_mul<half>(rQ[ri].format<half>(), (half)scale_factor);
             }
         } else {
             constexpr int num_full_blocks = head_size / REG_K;
@@ -669,7 +670,6 @@ void sdpa_kernel(
                 int k = i * REG_K;
                 cm_load_2d(QmatI32, query, q_off + k * sizeof(uint) / 2, q_pitch);
                 Transpose2DMatrix(QmatI32, rQ[i].format<uint, REG_K/2, q_step>());
-                rQ[i].format<half>() = cm_mul<half>(rQ[i].format<half>(), (half)scale_factor);
             }
 
             // if with tail, load with head_size_tail
@@ -679,7 +679,6 @@ void sdpa_kernel(
                 matrix<uint, q_step, REG_K/2> QmatI32;
                 cm_load_2d_with_tail<q_step, REG_K/2, (head_size % REG_K) / 2>(QmatI32, query, q_off + k * sizeof(half), q_pitch);
                 Transpose2DMatrix(QmatI32, rQ[num_full_blocks].format<uint, REG_K/2, q_step>());
-                rQ[num_full_blocks].format<half>() = cm_mul<half>(rQ[num_full_blocks].format<half>(), (half)scale_factor);
             }
         }
     }
@@ -814,6 +813,8 @@ void sdpa_kernel(
         //=========================================================== 1807 ~ 3247
         //# St = k @ Qt
         matrix<float, kv_step, q_step> St = ugemm_KQ(slm_K, rQ, slm_offset);
+        // Post-scale QK scores in fp32 (avoids (half)scale_factor truncation)
+        St = cm_mul<float>(St, (float)scale_factor);
 
         if constexpr (use_causal_mask) {
             if (causal_left < kv_step) {
