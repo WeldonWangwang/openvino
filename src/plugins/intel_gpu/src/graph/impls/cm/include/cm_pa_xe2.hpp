@@ -99,7 +99,6 @@ void pa_lsc_u8(
         #pragma unroll
         for (int k = 0, ri = 0; k < head_size / 2; k += REG_K / 2, ri++) {
             cm_load<lsc::Transpose>(rQ[ri].format<uint>(), b2dQ.set_block_x(k));
-            rQ[ri].format<half>() = cm_mul<half>(rQ[ri].format<half>(), (half)scale_factor);
         }
     }
 
@@ -299,19 +298,21 @@ void pa_lsc_u8(
                     uint slm_offset = (slm_buff_id_read & 3) * slm_buff_size;
 
                     matrix<float, kv_step, q_step> St = ugemm_KQ(slm_K, rQ, slm_offset);
+                    // Post-scale QK scores in fp32 (avoids (half)scale_factor truncation)
+                    St = cm_mul<float>(St, (float)scale_factor);
 
                     if constexpr (use_causal_mask) {
                         if (causal_left == 0) {
                             apply_causal_mask<1>(St);
                         } else if (causal_left < 0) {
                             St = -3.4e38f;
+                        } else if (causal_left < kv_step) {
+                            for (int p = causal_left; p < kv_step; p++) St[p] = -3.4e38f;
                         }
                         causal_left -= kv_step;
-                    } else {
-                        int kv_tokens = kv_stop - kv_pos;
-                        for (int p = kv_tokens; p < kv_step; p++) St[p] = -3.4e38f;
                     }
-
+                    int kv_tokens = kv_stop - kv_pos;
+                    for (int p = kv_tokens; p < kv_step; p++) St[p] = -3.4e38f;
                     auto max_comp = online_softmax_update(St, cur_max, cur_sum);
 
                     matrix<half, REG_N, REG_K> P;
@@ -460,24 +461,33 @@ void pa_lsc_u8(
             continue;
         }
 #endif
+        // Skip computation for fully-masked causal blocks (after barriers/SLM load).
+        if constexpr (use_causal_mask) {
+            if (causal_left < 0) {
+                causal_left -= kv_step;
+                continue;
+            }
+        }
 
         {
             uint slm_offset = (slm_buff_id_read & 3) * slm_buff_size;
 
             matrix<float, kv_step, q_step> St = ugemm_KQ(slm_K, rQ, slm_offset);
+            // Post-scale QK scores in fp32 (avoids (half)scale_factor truncation)
+            St = cm_mul<float>(St, (float)scale_factor);
 
             if constexpr (use_causal_mask) {
                 if (causal_left == 0) {
                     apply_causal_mask<1>(St);
                 } else if (causal_left < 0) {
                     St = -3.4e38f;
+                } else if (causal_left < kv_step) {
+                    for (int p = causal_left; p < kv_step; p++) St[p] = -3.4e38f;
                 }
                 causal_left -= kv_step;
-            } else {
-                int kv_tokens = kv_stop - kv_pos;
-                for (int p = kv_tokens; p < kv_step; p++) St[p] = -3.4e38f;
             }
-
+            int kv_tokens = kv_stop - kv_pos;
+            for (int p = kv_tokens; p < kv_step; p++) St[p] = -3.4e38f;
             auto max_comp = online_softmax_update(St, cur_max, cur_sum);
 
             matrix<half, REG_N, REG_K> P;
@@ -599,7 +609,6 @@ void pa_kernel_lsc_prefetch_f16(
         #pragma unroll
         for(int k = 0, ri = 0; k < head_size/2; k += REG_K/2, ri++) {
             cm_load<lsc::Transpose>(rQ[ri].format<uint>(), b2dQ.set_block_x(k));
-            rQ[ri].format<half>() = cm_mul<half>(rQ[ri].format<half>(), (half)scale_factor);
         }
     }
 
@@ -682,20 +691,22 @@ void pa_kernel_lsc_prefetch_f16(
                 }
             }
         }
+        // Post-scale QK scores in fp32 (avoids (half)scale_factor truncation)
+        St = cm_mul<float>(St, (float)scale_factor);
         if constexpr (use_causal_mask) {
             // since kv_step == q_step == 16, causal_left is n*kv_step
             if (causal_left == 0) {
                 apply_causal_mask<1>(St);
             } else if (causal_left < 0) {
                 St = -3.4e38f;
+            } else if (causal_left < kv_step) {
+                for (int p = causal_left; p < kv_step; p++) St[p] = -3.4e38f;
             }
             causal_left -= kv_step;
-        } else {
-            int kv_tokens = kv_stop - kv_pos;
-            // LSC ensures no overflow-access, but mask off k-tails attn-score is still required
-            for(int p = kv_tokens; p < kv_step; p++) St[p] = -3.4e38f;
         }
-
+        int kv_tokens = kv_stop - kv_pos;
+        // LSC ensures no overflow-access, but mask off k-tails attn-score is still required
+        for(int p = kv_tokens; p < kv_step; p++) St[p] = -3.4e38f;
         //show(St);
         auto max_comp = online_softmax_update(St, cur_max, cur_sum);
 
@@ -830,20 +841,22 @@ void pa_kernel_lsc_prefetch_f16(
                 }
             }
         }
+        // Post-scale QK scores in fp32 (avoids (half)scale_factor truncation)
+        St = cm_mul<float>(St, (float)scale_factor);
         if constexpr (use_causal_mask) {
             // since kv_step == q_step == 16, causal_left is n*kv_step
             if (causal_left == 0) {
                 apply_causal_mask<1>(St);
             } else if (causal_left < 0) {
                 St = -3.4e38f;
+            } else if (causal_left < kv_step) {
+                for (int p = causal_left; p < kv_step; p++) St[p] = -3.4e38f;
             }
             causal_left -= kv_step;
-        } else {
-            int kv_tokens = kv_stop - kv_pos;
-            // LSC ensures no overflow-access, but mask off k-tails attn-score is still required
-            for(int p = kv_tokens; p < kv_step; p++) St[p] = -3.4e38f;
         }
-
+        int kv_tokens = kv_stop - kv_pos;
+        // LSC ensures no overflow-access, but mask off k-tails attn-score is still required
+        for(int p = kv_tokens; p < kv_step; p++) St[p] = -3.4e38f;
         //show(St);
         auto max_comp = online_softmax_update(St, cur_max, cur_sum);
 
