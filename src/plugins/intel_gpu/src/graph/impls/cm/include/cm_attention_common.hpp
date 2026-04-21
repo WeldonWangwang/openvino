@@ -390,6 +390,22 @@ constexpr void apply_causal_mask(matrix_ref<float, N, M> St) {
     }
 }
 
+// Apply shifted causal mask: mask St[r][c] when r > c + offset.
+// Handles the tile containing the causal boundary when past_lens % kv_step != 0.
+// offset is in range [1, N-1]: the number of valid KV rows before the causal diagonal starts.
+template <int N, int M>
+inline void apply_shifted_causal_mask(matrix_ref<float, N, M> St, int offset) {
+    for (int r = offset + 1; r < N; r++) {
+        int mask_end = r - offset;  // number of cols to mask from left
+        if (mask_end >= M) {
+            St.row(r) = -3.4e38f;
+        } else {
+            for (int c = 0; c < mask_end; c++)
+                St[r][c] = -3.4e38f;
+        }
+    }
+}
+
 //prepack [K, N] to [K/2, N, 2] layout.
 template <typename T1, typename T2, int K, int N>
 inline void prepackAsVNNIWidth2(matrix_ref<T1, K, N> input, matrix_ref<T2, K/2, N*2> out) {

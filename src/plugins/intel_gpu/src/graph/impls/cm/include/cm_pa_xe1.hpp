@@ -1,7 +1,7 @@
 // Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
-// #define CMPA_DEBUG_ALL_MASKED  // Enable verbose cm_printf logging (opt-in; do not enable by default)
+
 #ifndef CM_HAS_LSC_UNTYPED_2D
 
 #if CMPA_KVCACHE_U8
@@ -253,36 +253,33 @@ void pa_lsc_u8(
             St = cm_mul<float>(St, (float)scale_factor);
             if constexpr (use_causal_mask) {
                 if constexpr (kv_step == q_step) {
-                    // since kv_step == q_step == 16, causal_left is n * kv_step
                     if (causal_left == 0) {
                         apply_causal_mask<1>(St);
                     } else if (causal_left < 0) {
                         St = -3.4e38f;
                     } else if (causal_left < kv_step) {
-                        for (int p = causal_left; p < kv_step; p++)
-                            St[p] = -3.4e38f;
+                        apply_shifted_causal_mask(St, causal_left);
                     }
                 } else {
                     if (causal_left == 0) {
                         // q_step is half of kv_step
-                        // calsual mask first half of the kv
                         apply_causal_mask<1>(St.select<q_step, 1, q_step, 1>(0, 0));
                         St.select<q_step, 1, q_step, 1>(q_step, 0) = -3.4e38f;
                     } else if (causal_left < 0) {
                         St = -3.4e38f;
                     } else if (causal_left < kv_step) {
-                        // q_step is half of kv_step
                         // Workaround for an IGC ICE on ARL-H triggered by submatrix in-place masking.
-                        // Materialize St before applying the partial causal mask.
                         St += 0.f;
-                        apply_causal_mask<1>(St.select<q_step, 1, q_step, 1>(q_step, 0));
+                        apply_shifted_causal_mask(St, causal_left);
                     }
                 }
                 causal_left -= kv_step;
             }
-            int kv_tokens = kv_stop - kv_pos;
-            // LSC ensures no overflow-access, but mask off k-tails attn-score is still required
-            for(int p = kv_tokens; p < kv_step; p++) St[p] = -3.4e38f;
+            {
+                int kv_tokens = kv_stop - kv_pos;
+                // LSC ensures no overflow-access, but mask off k-tails attn-score is still required
+                for(int p = kv_tokens; p < kv_step; p++) St[p] = -3.4e38f;
+            }
             auto max_comp = online_softmax_update(St, cur_max, cur_sum);
 
             matrix<half, REG_N, REG_K> P;
@@ -307,7 +304,9 @@ void pa_lsc_u8(
 
     //# save cur_O/cur_sum.transpose(0, 1)
     matrix<half, num_P_tiles*REG_M, REG_N> cur_O_f16;
-    cur_sum = cm_inv(cur_sum);
+    // Use IEEE-precise division instead of cm_inv() hardware approximation
+    #pragma unroll
+    for (int i = 0; i < cur_sum.n_elems(); i++) cur_sum[i] = 1.0f / cur_sum[i];
 
     #pragma unroll
     for(int k = 0, ri=0; k < head_size; k += REG_N, ri += num_P_tiles) {
@@ -498,37 +497,34 @@ void pa_kernel_lsc_prefetch_f16(
         St = cm_mul<float>(St, (float)scale_factor);
         if constexpr (use_causal_mask) {
             if constexpr (kv_step == q_step) {
-            // since kv_step == q_step == 16, causal_left is n * kv_step
             if (causal_left == 0) {
                 apply_causal_mask<1>(St);
             } else if (causal_left < 0) {
                 St = -3.4e38f;
             } else if (causal_left < kv_step) {
-                for (int p = causal_left; p < kv_step; p++)
-                    St[p] = -3.4e38f;
-            }
+                apply_shifted_causal_mask(St, causal_left);
             }
             } else {
             if (causal_left == 0) {
                 // q_step is half of kv_step
-                // calsual mask first half of the kv
                 apply_causal_mask<1>(St.select<q_step, 1, q_step, 1>(0, 0));
                 St.select<q_step, 1, q_step, 1>(q_step, 0) = -3.4e38f;
             } else if (causal_left < 0) {
                 St = -3.4e38f;
             } else if (causal_left < kv_step) {
-                // q_step is half of kv_step
-                // calsual mask second half of the kv
-                // if w/o St += 0.f;, I will meet IGC: Internal Compiler Error: Access violation on ARL-H
+                // Workaround for an IGC ICE on ARL-H
                 St += 0.f;
-                apply_causal_mask<1>(St.select<q_step, 1, q_step, 1>(q_step, 0));
+                apply_shifted_causal_mask(St, causal_left);
             }
             }
             causal_left -= kv_step;
         }
-        int kv_tokens = kv_stop - kv_pos;
-        // LSC ensures no overflow-access, but mask off k-tails attn-score is still required
-        for(int p = kv_tokens; p < kv_step; p++) St[p] = -3.4e38f;
+        {
+            int kv_tokens = kv_stop - kv_pos;
+            // LSC ensures no overflow-access, but mask off k-tails attn-score is still required
+            for(int p = kv_tokens; p < kv_step; p++) St[p] = -3.4e38f;
+        }
+
         // show(St);
         auto max_comp = online_softmax_update(St, cur_max, cur_sum);
 
@@ -616,7 +612,9 @@ void pa_kernel_lsc_prefetch_f16(
 
     //# save cur_O/cur_sum.transpose(0, 1)
     matrix<half, num_P_tiles * REG_M, REG_N> cur_O_f16;
-    cur_sum = cm_inv(cur_sum);
+    // Use IEEE-precise division instead of cm_inv() hardware approximation
+    #pragma unroll
+    for (int i = 0; i < cur_sum.n_elems(); i++) cur_sum[i] = 1.0f / cur_sum[i];
     #pragma unroll
     for(int k = 0, ri=0; k < head_size; k += REG_N, ri += num_P_tiles) {
         #pragma unroll
