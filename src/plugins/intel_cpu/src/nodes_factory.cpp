@@ -110,6 +110,7 @@
 #include "nodes/topk.h"
 #include "nodes/transpose.h"
 #include "nodes/unique.hpp"
+#include "nodes/iq3_xxs_linear.h"
 #include "openvino/cc/factory.h"
 #include "selective_build.h"
 
@@ -243,6 +244,7 @@ Node::NodesFactory::NodesFactory() : Factory("NodesFactory") {
     INTEL_CPU_NODE(ScaledDotProductAttention, Type::ScaledDotProductAttention);
     INTEL_CPU_NODE(SearchSorted, Type::SearchSorted);
     INTEL_CPU_NODE(SegmentMax, Type::SegmentMax);
+    INTEL_CPU_NODE(IQ3XXSLinear, Type::IQ3XXSLinear);
     INTEL_CPU_NODE(LoRA, Type::LoRA);
     INTEL_CPU_NODE(GatherMatmul, Type::GatherMatmul);
     INTEL_CPU_NODE(GatedDeltaNet, Type::GatedDeltaNet);

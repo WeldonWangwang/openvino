@@ -1,105 +1,41 @@
 // Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
+// CPU plugin native kernel for IQ3XXSLinear: fused on-the-fly IQ3_XXS
+// dequantization + MatMul (Y = X @ W^T). Weight tiles are decoded into a small
+// thread-local buffer and reused across all activation rows; the full weight
+// matrix is never persistently materialized. Parallelized with std::thread
+// because this OpenVINO build uses THREADING=SEQ (ov::parallel_for is serial).
 
-#include "openvino/op/iq3_xxs_linear.hpp"
+#include "iq3_xxs_linear.h"
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <mutex>
+#include <string>
 #include <thread>
 #include <vector>
 
-#include "openvino/core/validation_util.hpp"
+#include "cpu_memory.h"
+#include "memory_desc/cpu_memory_desc.h"
+#include "node.h"
+#include "onednn/iml_type_mapper.h"
+#include "openvino/core/except.hpp"
+#include "openvino/core/parallel.hpp"
+#include "openvino/core/type/element_type.hpp"
+#include "shape_inference/shape_inference_cpu.hpp"
 
-namespace ov {
-namespace op {
-namespace internal {
-
-IQ3XXSLinear::IQ3XXSLinear(const Output<Node>& activation,
-                           const Output<Node>& compressed_weights,
-                           const ov::Shape& weight_shape,
-                           int64_t block_size,
-                           int64_t bytes_per_block)
-    : Op({activation, compressed_weights}),
-      m_weight_shape(weight_shape),
-      m_block_size(block_size),
-      m_bytes_per_block(bytes_per_block) {
-    constructor_validate_and_infer_types();
-}
-
-bool IQ3XXSLinear::visit_attributes(ov::AttributeVisitor& visitor) {
-    visitor.on_attribute("weight_shape", m_weight_shape);
-    visitor.on_attribute("block_size", m_block_size);
-    visitor.on_attribute("bytes_per_block", m_bytes_per_block);
-    return true;
-}
-
-void IQ3XXSLinear::validate_and_infer_types() {
-    // Input 0: activation [M, K] or [batch..., M, K]
-    const auto& activation_type = get_input_element_type(0);
-    const auto& activation_pshape = get_input_partial_shape(0);
-
-    // Input 1: compressed weights blob [total_bytes] - must be u8
-    const auto& weights_type = get_input_element_type(1);
-    NODE_VALIDATION_CHECK(this,
-                          weights_type == element::u8,
-                          "Compressed weights must be u8 type, got: ",
-                          weights_type);
-
-    // Validate weight_shape: [N, K]
-    NODE_VALIDATION_CHECK(this,
-                          m_weight_shape.size() == 2,
-                          "weight_shape must be 2D [N, K], got rank: ",
-                          m_weight_shape.size());
-
-    const int64_t N = static_cast<int64_t>(m_weight_shape[0]);
-    const int64_t K = static_cast<int64_t>(m_weight_shape[1]);
-
-    // Validate K is compatible with block_size
-    NODE_VALIDATION_CHECK(this,
-                          K % m_block_size == 0,
-                          "K (", K, ") must be divisible by block_size (", m_block_size, ")");
-
-    // Validate compressed data size
-    const int64_t blocks_per_row = K / m_block_size;
-    const int64_t expected_bytes = N * blocks_per_row * m_bytes_per_block;
-    if (get_input_partial_shape(1).is_static()) {
-        const auto& weights_shape = get_input_partial_shape(1).to_shape();
-        NODE_VALIDATION_CHECK(this,
-                              weights_shape.size() == 1,
-                              "Compressed weights must be 1D blob");
-        NODE_VALIDATION_CHECK(this,
-                              static_cast<int64_t>(weights_shape[0]) == expected_bytes,
-                              "Compressed weights size mismatch: expected ",
-                              expected_bytes, " bytes, got ", weights_shape[0]);
-    }
-
-    // Output shape: activation leading dims + N
-    // activation: [..., M, K] -> output: [..., M, N]
-    if (activation_pshape.rank().is_dynamic()) {
-        set_output_type(0, activation_type, ov::PartialShape::dynamic());
-    } else {
-        auto output_pshape = activation_pshape;
-        // Last dim of activation (K) replaced by N (from weight_shape[0])
-        output_pshape[output_pshape.rank().get_length() - 1] = N;
-        set_output_type(0, activation_type, output_pshape);
-    }
-}
-
-std::shared_ptr<Node> IQ3XXSLinear::clone_with_new_inputs(const ov::OutputVector& new_args) const {
-    check_new_args_count(this, new_args);
-    return std::make_shared<IQ3XXSLinear>(new_args[0],
-                                          new_args[1],
-                                          m_weight_shape,
-                                          m_block_size,
-                                          m_bytes_per_block);
-}
+namespace ov::intel_cpu::node {
 
 namespace {
 
-// IQ3_XXS codebook tables (from ggml-common.h). Kept local to make the core op
-// self-contained so it has a working reference evaluate() fallback.
+// ---------------------------------------------------------------------------
+// IQ3_XXS codebook tables (copied from ggml-common.h; identical to the values
+// used by the reference dequantizer so results are bit-compatible).
+// ---------------------------------------------------------------------------
 const uint32_t kIq3xxsGrid[256] = {
     0x04040404, 0x04040414, 0x04040424, 0x04040c0c, 0x04040c1c, 0x04040c3e,
     0x04041404, 0x04041414, 0x04041c0c, 0x04042414, 0x04043e1c, 0x04043e2c,
@@ -159,6 +95,9 @@ const uint8_t kSignsIq2xs[128] = {
 
 const uint8_t kMaskIq2xs[8] = {1, 2, 4, 8, 16, 32, 64, 128};
 
+constexpr size_t QK_K = 256;            // weights per super-block
+constexpr size_t BLOCK_BYTES = 98;      // bytes per super-block
+
 inline float fp16_to_f32(uint16_t h) {
     uint32_t sign = (h & 0x8000u) << 16;
     uint32_t exp = (h >> 10) & 0x1F;
@@ -186,26 +125,30 @@ inline float fp16_to_f32(uint16_t h) {
     return result;
 }
 
+// Decode one IQ3_XXS weight row (K values) into a contiguous f32 buffer.
 inline void decode_iq3_xxs_row(const uint8_t* w_row, float* out, size_t blocks_per_row) {
-    constexpr size_t QK_K = 256;
-    constexpr size_t BLOCK_BYTES = 98;
     for (size_t blk = 0; blk < blocks_per_row; blk++) {
         const uint8_t* block_data = w_row + blk * BLOCK_BYTES;
+
         uint16_t d_fp16;
         memcpy(&d_fp16, block_data, 2);
         const float d = fp16_to_f32(d_fp16);
+
         const uint8_t* qs = block_data + 2;
-        const uint8_t* scales_and_signs = qs + QK_K / 4;
+        const uint8_t* scales_and_signs = qs + QK_K / 4;  // +64
+
         float* o = out + blk * QK_K;
         size_t oi = 0;
         for (int ib32 = 0; ib32 < 8; ++ib32) {
             uint32_t aux32;
             memcpy(&aux32, scales_and_signs + 4 * ib32, sizeof(uint32_t));
             const float db = d * (0.5f + (aux32 >> 28)) * 0.5f;
+
             for (int l = 0; l < 4; ++l) {
                 const uint8_t signs = kSignsIq2xs[(aux32 >> 7 * l) & 127];
                 const uint8_t* grid1 = reinterpret_cast<const uint8_t*>(&kIq3xxsGrid[qs[2 * l + 0]]);
                 const uint8_t* grid2 = reinterpret_cast<const uint8_t*>(&kIq3xxsGrid[qs[2 * l + 1]]);
+
                 for (int j = 0; j < 4; ++j) {
                     o[oi++] = db * grid1[j] * ((signs & kMaskIq2xs[j + 0]) ? -1.f : 1.f);
                 }
@@ -220,43 +163,106 @@ inline void decode_iq3_xxs_row(const uint8_t* w_row, float* out, size_t blocks_p
 
 }  // namespace
 
-bool IQ3XXSLinear::evaluate(ov::TensorVector& outputs, const ov::TensorVector& inputs) const {
-    const auto& act_shape = inputs[0].get_shape();
-    const size_t rank = act_shape.size();
-    const size_t M = (rank >= 2) ? act_shape[rank - 2] : 1;
-    const size_t K = act_shape[rank - 1];
-    const size_t N = m_weight_shape[0];
+IQ3XXSLinear::IQ3XXSLinear(const std::shared_ptr<ov::Node>& op, const GraphContext::CPtr& context)
+    : Node(op, context, NgraphShapeInferFactory(op)) {
+    std::string errorMessage;
+    if (!isSupportedOperation(op, errorMessage)) {
+        OPENVINO_THROW_NOT_IMPLEMENTED(errorMessage);
+    }
+}
 
-    size_t batch = 1;
-    for (size_t i = 0; i + 2 < rank; i++) {
-        batch *= act_shape[i];
+bool IQ3XXSLinear::isSupportedOperation(const std::shared_ptr<const ov::Node>& op,
+                                        std::string& errorMessage) noexcept {
+    try {
+        // Match by type name to stay independent of the op's C++ type identity
+        // (the IQ3XXSLinear op header exists in both the core and GenAI builds).
+        if (std::string(op->get_type_name()) != "IQ3XXSLinear") {
+            errorMessage = "Not an IQ3XXSLinear operation.";
+            return false;
+        }
+        if (op->get_input_size() != 2) {
+            errorMessage = "IQ3XXSLinear expects 2 inputs.";
+            return false;
+        }
+        if (op->get_input_element_type(1) != ov::element::u8) {
+            errorMessage = "IQ3XXSLinear compressed weights must be u8.";
+            return false;
+        }
+        const auto& act_pshape = op->get_input_partial_shape(0);
+        if (act_pshape.rank().is_dynamic()) {
+            errorMessage = "IQ3XXSLinear activation rank must be static.";
+            return false;
+        }
+        if (act_pshape[act_pshape.rank().get_length() - 1].is_dynamic()) {
+            errorMessage = "IQ3XXSLinear activation K dim must be static.";
+            return false;
+        }
+    } catch (...) {
+        return false;
+    }
+    return true;
+}
+
+void IQ3XXSLinear::initSupportedPrimitiveDescriptors() {
+    if (!supportedPrimitiveDescriptors.empty()) {
+        return;
+    }
+    // Activation and output in f32 (the model builder converts activations to
+    // f32 before this op); compressed weights are an opaque u8 blob.
+    addSupportedPrimDesc({{LayoutType::ncsp, ov::element::f32}, {LayoutType::ncsp, ov::element::u8}},
+                         {{LayoutType::ncsp, ov::element::f32}},
+                         impl_desc_type::ref);
+}
+
+void IQ3XXSLinear::execute([[maybe_unused]] const dnnl::stream& strm) {
+    // One-time diagnostic: confirms this CPU-plugin native kernel is actually
+    // the path executing the IQ3XXSLinear op (vs. a generic Reference fallback).
+    // Gated behind an env var so it adds no noise unless explicitly requested.
+    static const bool s_trace = (std::getenv("OV_CPU_IQ3XXS_TRACE") != nullptr);
+    if (s_trace) {
+        static std::once_flag s_once;
+        std::call_once(s_once, [] {
+            std::fprintf(stderr, "[intel_cpu] IQ3XXSLinear native plugin kernel executing\n");
+            std::fflush(stderr);
+        });
     }
 
-    ov::Shape out_shape = act_shape;
-    out_shape[rank - 1] = N;
-    outputs[0].set_shape(out_shape);
+    auto srcMem = getSrcMemoryAtPort(0);
+    auto wMem = getSrcMemoryAtPort(1);
+    auto dstMem = getDstMemoryAtPort(0);
 
-    const float* act_data = inputs[0].data<float>();
-    const uint8_t* compressed = inputs[1].data<uint8_t>();
-    float* out_data = outputs[0].data<float>();
+    const auto& actDims = srcMem->getStaticDims();
+    const auto& dstDims = dstMem->getStaticDims();
+    const size_t rank = actDims.size();
 
-    constexpr size_t QK_K = 256;
+    const size_t K = actDims[rank - 1];
+    const size_t N = dstDims[dstDims.size() - 1];
+    size_t rows = 1;
+    for (size_t i = 0; i + 1 < rank; ++i) {
+        rows *= actDims[i];
+    }
+
+    const float* act = srcMem->getDataAs<float>();
+    const uint8_t* compressed = wMem->getDataAs<uint8_t>();
+    float* out = dstMem->getDataAs<float>();
+
     const size_t blocks_per_row = K / QK_K;
-    const size_t bytes_per_row = blocks_per_row * 98;
-    const size_t rows = batch * M;
+    const size_t bytes_per_row = blocks_per_row * BLOCK_BYTES;
 
-    auto worker = [&](size_t n_begin, size_t n_end) {
+    // Worker: for output channels [n0, n1), decode each weight row once, then
+    // accumulate the dot product against every activation row.
+    auto worker = [&](size_t n0, size_t n1) {
         std::vector<float> wbuf(K);
-        for (size_t n = n_begin; n < n_end; n++) {
+        for (size_t n = n0; n < n1; ++n) {
             decode_iq3_xxs_row(compressed + n * bytes_per_row, wbuf.data(), blocks_per_row);
             const float* w = wbuf.data();
-            for (size_t r = 0; r < rows; r++) {
-                const float* a = act_data + r * K;
+            for (size_t r = 0; r < rows; ++r) {
+                const float* a = act + r * K;
                 float acc = 0.0f;
-                for (size_t k = 0; k < K; k++) {
+                for (size_t k = 0; k < K; ++k) {
                     acc += a[k] * w[k];
                 }
-                out_data[r * N + n] = acc;
+                out[r * N + n] = acc;
             }
         }
     };
@@ -270,13 +276,13 @@ bool IQ3XXSLinear::evaluate(ov::TensorVector& outputs, const ov::TensorVector& i
     constexpr size_t PARALLEL_THRESHOLD = 1ull << 20;
     if (total_work < PARALLEL_THRESHOLD || N < nthreads || nthreads <= 1) {
         worker(0, N);
-        return true;
+        return;
     }
 
     std::vector<std::thread> pool;
     pool.reserve(nthreads - 1);
     const size_t chunk = (N + nthreads - 1) / nthreads;
-    for (size_t t = 1; t < nthreads; t++) {
+    for (size_t t = 1; t < nthreads; ++t) {
         const size_t b = t * chunk;
         if (b >= N) {
             break;
@@ -287,9 +293,6 @@ bool IQ3XXSLinear::evaluate(ov::TensorVector& outputs, const ov::TensorVector& i
     for (auto& th : pool) {
         th.join();
     }
-    return true;
 }
 
-}  // namespace internal
-}  // namespace op
-}  // namespace ov
+}  // namespace ov::intel_cpu::node

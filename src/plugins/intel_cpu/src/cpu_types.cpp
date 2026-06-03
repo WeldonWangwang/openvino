@@ -266,7 +266,8 @@ static const TypeToNameMap& get_type_to_name_tbl() {
         {"GatherMatmulCompressed", Type::GatherMatmul},
         {"GatedDeltaNet", Type::GatedDeltaNet},
         {"PagedGatedDeltaNet", Type::PagedGatedDeltaNet},
-        {"PagedCausalConv1D", Type::PagedCausalConv1D}};
+        {"PagedCausalConv1D", Type::PagedCausalConv1D},
+        {"IQ3XXSLinear", Type::IQ3XXSLinear}};
     return type_to_name_tbl;
 }
 
@@ -405,6 +406,7 @@ std::string NameFromType(const Type type) {
         CASE(GatedDeltaNet);
         CASE(PagedGatedDeltaNet);
         CASE(PagedCausalConv1D);
+        CASE(IQ3XXSLinear);
         CASE(Unknown);
     }
 #undef CASE
