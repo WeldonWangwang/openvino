@@ -3,29 +3,36 @@
 //
 // GPU plugin op factory for the internal IQ3XXSLinear op.
 //
-// M4 step 1 (correctness closure): the compressed IQ3_XXS weight blob is
-// decoded on the host into a dense weights Constant and lowered to the existing,
-// highly-optimized cldnn `fully_connected` primitive. This makes the *native*
-// IQ3XXSLinear graph (OV_GENAI_IQ3XXS_NATIVE=1) loadable and correct on GPU,
-// reusing the proven GPU MatMul kernels.
+// Two lowerings are provided:
 //
-// NOTE: this materializes the full FP16/F32 weight tensor in device memory at
-// compile time, so it does NOT yet preserve the runtime compression benefit on
-// GPU. The on-the-fly compressed OpenCL kernel (decode-in-kernel) is the planned
-// follow-up (M4 step 2) and will replace this lowering.
+//  * Default (M4 step 2): a custom OpenCL kernel that keeps the IQ3_XXS weight
+//    blob *compressed* (u8) in device memory and decodes grid/sign/scale
+//    on-the-fly inside the kernel while accumulating the dot product. The full
+//    FP16/F32 weight tensor is never materialized in device memory, preserving
+//    the IQ3_XXS runtime compression benefit on GPU.
+//
+//  * Fallback (M4 step 1, env OV_GPU_IQ3XXS_HOST_DEQUANT=1): host-side full
+//    dequantization into a dense weights Constant lowered to the optimized
+//    cldnn fully_connected primitive. Kept for A/B comparison and as a safety
+//    net; it does materialize the dense weights.
 
 #include "intel_gpu/plugin/program_builder.hpp"
 #include "intel_gpu/plugin/common_utils.hpp"
 
 #include "openvino/op/iq3_xxs_linear.hpp"
 #include "openvino/op/constant.hpp"
+#include "openvino/op/parameter.hpp"
 #include "openvino/core/type/float16.hpp"
 
 #include "intel_gpu/primitives/fully_connected.hpp"
+#include "intel_gpu/primitives/custom_gpu_primitive.hpp"
 #include "intel_gpu/primitives/data.hpp"
 
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
+#include <sstream>
+#include <string>
 #include <vector>
 
 namespace {
@@ -176,18 +183,149 @@ static void CreateIQ3XXSLinearOp(ProgramBuilder& p, const std::shared_ptr<ov::op
     OPENVINO_ASSERT(K % QK_K == 0,
                     "[GPU] IQ3XXSLinear K (", K, ") must be a multiple of ", QK_K);
 
+    const size_t blocks_per_row = K / QK_K;
+    const size_t bytes_per_row = blocks_per_row * BLOCK_BYTES;
+
+    const auto out_et = op->get_output_element_type(0);
+    const auto in_et = op->get_input_element_type(0);
+    const auto w_dtype = cldnn::element_type_to_data_type(out_et);
+
+    const bool host_dequant = std::getenv("OV_GPU_IQ3XXS_HOST_DEQUANT") != nullptr;
+
+    // ----------------------------------------------------------------------
+    // Default path (step 2): on-the-fly compressed-weight decode OCL kernel.
+    // The u8 compressed blob (inputs[1]) stays compressed in device memory.
+    // ----------------------------------------------------------------------
+    if (!host_dequant) {
+        const std::string act_type = (in_et == ov::element::f16) ? "half" : "float";
+        const std::string out_type = (out_et == ov::element::f16) ? "half" : "float";
+
+        std::ostringstream src;
+        src << "#pragma OPENCL EXTENSION cl_khr_fp16 : enable\n";
+        // IQ3_XXS codebook tables (inline __constant; identical to reference).
+        src << "__constant uint IQ3_GRID[256] = {\n";
+        for (int i = 0; i < 256; ++i) {
+            src << "0x" << std::hex << kIq3xxsGrid[i] << std::dec << "u,";
+            if ((i & 7) == 7) src << "\n";
+        }
+        src << "};\n";
+        src << "__constant uchar IQ3_SIGNS[128] = {\n";
+        for (int i = 0; i < 128; ++i) {
+            src << static_cast<int>(kSignsIq2xs[i]) << ",";
+            if ((i & 15) == 15) src << "\n";
+        }
+        src << "};\n";
+        src << "__constant uchar IQ3_MASK[8] = {1,2,4,8,16,32,64,128};\n";
+
+        // One work-item per output element (m, n). gws = M*N (via "b*f*y*x").
+        src << "__kernel void iq3xxs_fc(\n"
+               "    const __global " << act_type << "* act,\n"
+               "    const __global uchar* weights,\n"
+               "    __global " << out_type << "* output) {\n"
+               "    const uint gid = (uint)get_global_id(0);\n"
+               "    if (gid >= (uint)GLOBAL_WORKSIZE[0]) return;\n"
+               "    const uint n = gid % (uint)(IQ_N);\n"
+               "    const uint m = gid / (uint)(IQ_N);\n"
+               "    const __global uchar* wrow = weights + (ulong)n * IQ_BYTES_PER_ROW;\n"
+               "    const __global " << act_type << "* arow = act + (ulong)m * IQ_K;\n"
+               "    float acc = 0.0f;\n"
+               "    for (uint blk = 0; blk < IQ_BLOCKS_PER_ROW; ++blk) {\n"
+               "        const __global uchar* bd = wrow + (ulong)blk * 98u;\n"
+               "        const ushort dh = (ushort)bd[0] | ((ushort)bd[1] << 8);\n"
+               "        const float d = (float)as_half(dh);\n"
+               "        const __global uchar* qs = bd + 2;\n"
+               "        const __global uchar* ss = qs + 64;\n"  // QK_K/4
+               "        const uint kbase = blk * 256u;\n"
+               "        for (uint ib32 = 0; ib32 < 8u; ++ib32) {\n"
+               "            const __global uchar* s4 = ss + 4u * ib32;\n"
+               "            const uint aux = (uint)s4[0] | ((uint)s4[1] << 8) | ((uint)s4[2] << 16) | ((uint)s4[3] << 24);\n"
+               "            const float db = d * (0.5f + (float)(aux >> 28)) * 0.5f;\n"
+               "            const __global uchar* qsb = qs + ib32 * 8u;\n"
+               "            uint oi = ib32 * 32u;\n"
+               "            for (uint l = 0; l < 4u; ++l) {\n"
+               "                const uchar signs = IQ3_SIGNS[(aux >> (7u * l)) & 127u];\n"
+               "                const uint g1 = IQ3_GRID[qsb[2u*l + 0u]];\n"
+               "                const uint g2 = IQ3_GRID[qsb[2u*l + 1u]];\n"
+               "                for (uint j = 0; j < 4u; ++j) {\n"
+               "                    const float gv = (float)((g1 >> (8u*j)) & 0xffu);\n"
+               "                    const float sgn = (signs & IQ3_MASK[j]) ? -1.0f : 1.0f;\n"
+               "                    acc += (db * gv * sgn) * (float)arow[kbase + oi]; ++oi;\n"
+               "                }\n"
+               "                for (uint j = 0; j < 4u; ++j) {\n"
+               "                    const float gv = (float)((g2 >> (8u*j)) & 0xffu);\n"
+               "                    const float sgn = (signs & IQ3_MASK[j + 4u]) ? -1.0f : 1.0f;\n"
+               "                    acc += (db * gv * sgn) * (float)arow[kbase + oi]; ++oi;\n"
+               "                }\n"
+               "            }\n"
+               "        }\n"
+               "    }\n"
+               "    output[gid] = (" << out_type << ")acc;\n"
+               "}\n";
+
+        std::ostringstream opts;
+        opts << "-DIQ_N=" << N << " -DIQ_K=" << K
+             << " -DIQ_BLOCKS_PER_ROW=" << blocks_per_row
+             << " -DIQ_BYTES_PER_ROW=" << bytes_per_row;
+
+        // Reorder activation to dense bfyx to guarantee contiguous [M, K] layout.
+        auto act_reorder_name = layerName + "_act_bfyx";
+        auto act_reorder = cldnn::reorder(act_reorder_name,
+                                          inputs[0],
+                                          cldnn::format::bfyx,
+                                          cldnn::element_type_to_data_type(in_et));
+        p.add_primitive(*op, act_reorder);
+
+        std::vector<cldnn::custom_gpu_primitive::arg_desc> args(3);
+        args[0].type = cldnn::custom_gpu_primitive::arg_input;
+        args[0].index = 0;  // activation
+        args[1].type = cldnn::custom_gpu_primitive::arg_input;
+        args[1].index = 1;  // compressed weights (u8)
+        args[2].type = cldnn::custom_gpu_primitive::arg_output;
+        args[2].index = 0;
+
+        cldnn::layout out_layout(op->get_output_partial_shape(0),
+                                 w_dtype,
+                                 cldnn::format::get_default_format(op->get_output_partial_shape(0).size()));
+
+        // Clone the op (with Parameter inputs) so the custom primitive can run
+        // the op's shape inference for dynamic output shapes (M is dynamic in
+        // LLM decode). A null op here would crash update_output_shape().
+        ov::OutputVector clone_inputs;
+        for (size_t i = 0; i < op->get_input_size(); ++i) {
+            clone_inputs.emplace_back(
+                std::make_shared<ov::op::v0::Parameter>(op->get_input_element_type(i),
+                                                        op->get_input_partial_shape(i)));
+        }
+        std::shared_ptr<ov::Node> op_clone = op->clone_with_new_inputs(clone_inputs);
+
+        auto custom = cldnn::custom_gpu_primitive(
+            layerName,
+            {cldnn::input_info(act_reorder_name), inputs[1]},
+            {src.str()},
+            "iq3xxs_fc",
+            args,
+            opts.str(),
+            {out_layout},
+            /*gws*/ {1},
+            /*lws*/ {},
+            /*op*/ op_clone,
+            /*calcWgDimInputIdx*/ -1,
+            /*globalSizeRules*/ {"b*f*y*x"},
+            /*localSizeRules*/ {});
+
+        p.add_primitive(*op, custom);
+        return;
+    }
+
+    // ----------------------------------------------------------------------
+    // Fallback path (step 1): host dequant -> dense weights -> fully_connected.
+    // ----------------------------------------------------------------------
+
     // Fetch the opaque compressed weight blob from the u8 Constant input.
     auto weights_const = ov::as_type_ptr<ov::op::v0::Constant>(op->get_input_node_shared_ptr(1));
     OPENVINO_ASSERT(weights_const != nullptr,
                     "[GPU] IQ3XXSLinear expects a Constant compressed-weights input");
     const uint8_t* compressed = weights_const->get_data_ptr<uint8_t>();
-
-    const size_t blocks_per_row = K / QK_K;
-    const size_t bytes_per_row = blocks_per_row * BLOCK_BYTES;
-
-    // Host-side full dequantization into a dense [N, K] weights buffer.
-    const auto out_et = op->get_output_element_type(0);
-    const auto w_dtype = cldnn::element_type_to_data_type(out_et);
 
     cldnn::layout weights_layout(ov::PartialShape({static_cast<int64_t>(N), static_cast<int64_t>(K)}),
                                  w_dtype,
