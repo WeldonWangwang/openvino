@@ -41,6 +41,9 @@
 #include "openvino/core/type.hpp"
 #include "openvino/core/type/element_type.hpp"
 #include "openvino/op/constant.hpp"
+#include "openvino/op/convert.hpp"
+#include "openvino/op/reshape.hpp"
+#include "openvino/op/transpose.hpp"
 #include "openvino/runtime/threading/cpu_message.hpp"
 #include "ov_ops/fully_connected.hpp"
 #include "ov_ops/fully_connected_compressed.hpp"
@@ -253,6 +256,53 @@ FullyConnected::FullyConnected(const std::shared_ptr<ov::Node>& op, const GraphC
         OPENVINO_THROW_NOT_IMPLEMENTED("FullyConnectedQuantized is not implemented yet");
     } else {
         algorithm = Algorithm::FullyConnectedCommon;
+    }
+
+    // -----------------------------------------------------------------
+    // Probe WEIGHTS input for CompressedConstant (e.g. IQ3_XXS gguf
+    // weight). This is orthogonal to the op-type dispatch above: any
+    // FullyConnected* variant could in principle have a CC weight, but
+    // in practice it appears only on FullyConnectedCommon today.
+    //
+    // Setting attrs.isCompressedConstantWeight here lets the impl
+    // dispatcher (fullyconnected_implementations.cpp) route this FC
+    // node to CompressedConstantFCExecutor, which decodes the IQ3_XXS
+    // blob on the fly via kernels::iq3_xxs::iq3_xxs_fc(). All other
+    // impls' supports() predicates reject CC weights via the inverse
+    // check, so dispatch is unambiguous.
+    //
+    // ConvertMatMulToFC and friends may insert Convert / Reshape /
+    // Transpose nodes between the FC node and the underlying Constant
+    // weight source; unwrap a few hops so we can still recognize a CC.
+    //
+    // NOTE: Today this path only fires when the GenAI bridge pass
+    // (rewrite_compressed_matmul_to_iq3_xxs_linear) is bypassed via
+    // OPENVINO_GENAI_USE_COMPRESSED_CONST_FC=1. There is still a
+    // pending plugin-transformation issue (Phase C) where some
+    // pattern-based passes call ov::op::v0::Constant::cast_vector on
+    // a CompressedConstant and trip a buffer-over-read, so Route B
+    // (this branch) is not yet a default. See the design doc §10 and
+    // CompressedConstant + transformation compatibility notes.
+    // -----------------------------------------------------------------
+    if (op->get_input_size() > WEIGHTS) {
+        auto wsrc = op->input_value(WEIGHTS).get_node_shared_ptr();
+        for (int unwrap = 0; unwrap < 4; ++unwrap) {
+            if (ov::is_type<ov::op::util::CompressedConstant>(wsrc)) {
+                break;
+            }
+            if (ov::is_type<ov::op::v0::Convert>(wsrc) ||
+                ov::is_type<ov::op::v1::Reshape>(wsrc) ||
+                ov::is_type<ov::op::v1::Transpose>(wsrc)) {
+                wsrc = wsrc->input_value(0).get_node_shared_ptr();
+                continue;
+            }
+            break;
+        }
+        if (auto cc = ov::as_type_ptr<ov::op::util::CompressedConstant>(wsrc)) {
+            attrs.isCompressedConstantWeight = true;
+            attrs.compressedQuantType = cc->get_quant_type();
+            attrs.compressedLogicalWeightShape = cc->get_logical_shape();
+        }
     }
 }
 

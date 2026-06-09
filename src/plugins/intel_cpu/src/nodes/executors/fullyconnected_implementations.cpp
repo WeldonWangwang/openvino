@@ -10,6 +10,7 @@
 #include "debug_messages.hpp"
 #include "implementation_utils.hpp"
 #include "memory_desc/cpu_memory_desc.h"
+#include "nodes/executors/common/compressed_constant_fc.hpp"
 #include "nodes/executors/convolution_config.hpp"
 #include "nodes/executors/dnnl/dnnl_executor.hpp"
 #include "nodes/executors/dnnl/dnnl_fullyconnected_primitive.hpp"
@@ -191,6 +192,30 @@ struct CreateOptimalConfigDefault {
 template <>
 const std::vector<ExecutorImplementation<FCAttrs>>& getImplementations() {
     static const std::vector<ExecutorImplementation<FCAttrs>> fullyconnectedImplementations {
+        // ---------------------------------------------------------------
+        // [Priority 0] CompressedConstant weight blob (e.g. IQ3_XXS gguf).
+        //
+        // Hard-gated by FullyConnected ctor: only fires when WEIGHTS input is
+        // an ov::op::util::CompressedConstant. Other impls (MLAS / DNNL /
+        // ACL / Kleidiai) reject CC weights via noWeightsDecompression(),
+        // so dispatch is unambiguous.
+        //
+        // Phase 1 only supports IQ3_XXS, no post-ops. Layout / shape
+        // checks are owned by the executor itself; we expose AcceptsAnyShape
+        // because the kernel handles arbitrary [B*S, K] x [N, K] shapes.
+        // ---------------------------------------------------------------
+        OV_CPU_INSTANCE_COMMON(
+            "fullyconnected_compressed_constant",
+            ExecutorType::Common,
+            OperationType::FullyConnected,
+            // supports: thin wrapper around the executor's own static check.
+            [](const FCConfig& config) -> bool {
+                return CompressedConstantFCExecutor::supports(config);
+            },
+            HasNoOptimalConfig<FCAttrs>{},
+            AcceptsAnyShape<FCAttrs>,
+            CreateDefault<CompressedConstantFCExecutor, FCAttrs>{}
+            )
         OV_CPU_INSTANCE_MLAS_X64(
             "fullyconnected_mlas",
             ExecutorType::Mlas,
