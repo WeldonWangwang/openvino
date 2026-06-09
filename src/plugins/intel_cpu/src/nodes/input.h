@@ -9,6 +9,7 @@
 #include <memory>
 #include <oneapi/dnnl/dnnl_common.hpp>
 #include <openvino/op/constant.hpp>
+#include <openvino/op/util/compressed_constant.hpp>
 #include <string>
 
 #include "cpu_memory.h"
@@ -73,6 +74,20 @@ public:
     void withMeanImage();
     MemoryCPtr getMemoryPtr() const;
 
+    /// \brief Returns the underlying CompressedConstant op if this Input wraps one.
+    ///
+    /// Non-null only when the input op is an `ov::op::util::CompressedConstant`. Downstream
+    /// nodes (e.g. FullyConnected) can use this to dispatch to a compressed-weight kernel
+    /// path and read `get_quant_type()`, `get_logical_shape()`, etc.
+    std::shared_ptr<ov::op::util::CompressedConstant> getCompressedConstOp() const {
+        return m_compressedConstOp;
+    }
+
+    /// \brief Returns true iff this Input wraps a `CompressedConstant`.
+    bool isCompressedConstant() const {
+        return static_cast<bool>(m_compressedConstOp);
+    }
+
     void execute(const dnnl::stream& strm) override {}
     void executeDynamicImpl(const dnnl::stream& strm) override {}
 
@@ -92,10 +107,14 @@ public:
 
 private:
     void cloneBlobIfRequired();
+    void cloneCompressedBlob();
     void initSupportedPdDefault();
     void initSupportedPdFromMemDesc();
 
     std::shared_ptr<ov::op::v0::Constant> m_constOp;
+    // Non-null when m_constOp is actually a CompressedConstant. Holds the same pointer
+    // pre-cast to the subclass type so dispatch code does not need a runtime cast.
+    std::shared_ptr<ov::op::util::CompressedConstant> m_compressedConstOp;
     MemoryCPtr memoryPtr;
     bool isMeanImage = false;
     MemoryDescPtr extMemDesc = nullptr;

@@ -38,6 +38,7 @@
 #include "openvino/op/parameter.hpp"
 #include "openvino/op/read_value.hpp"
 #include "openvino/op/result.hpp"
+#include "openvino/op/util/compressed_constant.hpp"
 #include "shape_inference/shape_inference_pass_through.hpp"
 #include "transformations/cpu_opset/common/op/read_value_with_subgraph.hpp"
 #include "utils/general_utils.h"
@@ -396,7 +397,12 @@ jit_has_special_value_base::fn_t jit_has_bf16_overflows_function() {
 
 Input::Input(const std::shared_ptr<ov::Node>& op, const GraphContext::CPtr& context)
     : Node(op, context, PassThroughShapeInferFactory()) {
-    if (none_of(op->get_type_info(),
+    // CompressedConstant is a Constant subclass (different type_info, same parent in RTTI
+    // chain). Test it via ov::is_type to allow the subclass to flow through here.
+    const bool is_compressed_constant = ov::is_type<ov::op::util::CompressedConstant>(op);
+
+    if (!is_compressed_constant &&
+        none_of(op->get_type_info(),
                 op::v0::Parameter::get_type_info_static(),
                 op::v0::Constant::get_type_info_static(),
                 op::v0::Result::get_type_info_static(),
@@ -408,7 +414,14 @@ Input::Input(const std::shared_ptr<ov::Node>& op, const GraphContext::CPtr& cont
                                        " with name ",
                                        op->get_friendly_name());
     }
-    if (auto constOp = ov::as_type_ptr<op::v0::Constant>(op)) {
+    if (is_compressed_constant) {
+        // Take the CompressedConstant route: store the raw compressed blob as u8 [N_bytes]
+        // and skip the f32-element subnormal/bf16 scans that the generic path would do.
+        m_compressedConstOp = ov::as_type_ptr<ov::op::util::CompressedConstant>(op);
+        m_constOp = m_compressedConstOp;  // base-class alias for any code that reads m_constOp
+        constant = ConstantType::Const;
+        cloneCompressedBlob();
+    } else if (auto constOp = ov::as_type_ptr<op::v0::Constant>(op)) {
         constant = ConstantType::Const;
         m_constOp = constOp;
         cloneBlobIfRequired();
@@ -662,6 +675,41 @@ Input::Input(const std::shared_ptr<ov::Node>& op, const GraphContext::CPtr& cont
     extMemDesc = config.desc;
     m_useParentMemoryDescForOutput = config.useParentMemoryDescForOutput;
     m_isInPlace = config.inPlace;
+}
+
+// CompressedConstant routing.
+//
+// Background (see CompressedConstant design doc Phase 0.3):
+//
+// The generic cloneBlobIfRequired() path calls m_constOp->get_element_type() and
+// get_shape() which on a CompressedConstant return the LOGICAL view (e.g. f32 [N, K])
+// rather than the storage view (u8 [N_bytes]). Constructing a MemoryDesc from those
+// would allocate N*K*4 bytes and then memcpy only N_bytes from get_data_ptr(), leaving
+// the rest uninitialized, which would then be scanned for subnormals on every load —
+// either crashing or producing garbage.
+//
+// Instead, here we register a u8 [N_bytes] memory view that exactly matches the
+// underlying compressed blob. Downstream consumers that understand CompressedConstant
+// (e.g. FullyConnected) use Input::getCompressedConstOp() to obtain quant_type and
+// logical_shape and dispatch to a dedicated kernel; standard consumers will never
+// touch us because Input::isCompressedConstant() guards the dispatch.
+void Input::cloneCompressedBlob() {
+    OPENVINO_ASSERT(m_compressedConstOp, "Input::cloneCompressedBlob called without CompressedConstant op set.");
+
+    const auto compressed_bytes = m_compressedConstOp->get_compressed_byte_size();
+    OPENVINO_ASSERT(compressed_bytes > 0,
+                    "CompressedConstant '",
+                    m_compressedConstOp->get_friendly_name(),
+                    "' has zero compressed bytes.");
+
+    // u8 [N_bytes] storage view, exactly matching the underlying blob.
+    CpuBlockedMemoryDesc storageDesc(ov::element::u8, Shape{compressed_bytes});
+
+    // Zero-copy: hand the Constant's blob pointer to a shared Memory wrapper. No
+    // subnormal / bf16 scans, no memcpy. The Constant owns the buffer for the model
+    // lifetime so this is safe.
+    memoryPtr =
+        std::make_shared<Memory>(getEngine(), storageDesc, m_compressedConstOp->get_compressed_data_ptr());
 }
 
 MemoryCPtr Input::getMemoryPtr() const {

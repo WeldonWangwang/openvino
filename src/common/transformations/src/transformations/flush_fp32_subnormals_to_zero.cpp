@@ -10,6 +10,7 @@
 
 #include "itt.hpp"
 #include "openvino/core/graph_util.hpp"
+#include "openvino/op/util/compressed_constant.hpp"
 #include "openvino/pass/pattern/op/wrap_type.hpp"
 #include "transformations/utils/utils.hpp"
 
@@ -29,6 +30,11 @@ ov::pass::FlushFP32SubnormalsToZero::FlushFP32SubnormalsToZero() {
         auto node = ov::as_type_ptr<v0::Constant>(m.get_match_root());
 
         if (!node)
+            return false;
+        // CompressedConstant stores a raw compressed blob (u8 [N_bytes]) under a logical
+        // f32 [N, K] face. Reading its bytes as a contiguous f32 array would either crash
+        // (out-of-bounds) or produce garbage classified as subnormal. Skip unconditionally.
+        if (ov::is_type<ov::op::util::CompressedConstant>(node))
             return false;
         if (node->get_output_element_type(0) != element::f32)
             return false;
