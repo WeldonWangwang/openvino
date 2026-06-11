@@ -40,6 +40,7 @@
 #include "openvino/op/result.hpp"
 #include "openvino/op/util/compressed_constant.hpp"
 #include "shape_inference/shape_inference_pass_through.hpp"
+#include "transformations/cpu_opset/common/op/pinned_compressed_constant.hpp"
 #include "transformations/cpu_opset/common/op/read_value_with_subgraph.hpp"
 #include "utils/general_utils.h"
 
@@ -400,8 +401,10 @@ Input::Input(const std::shared_ptr<ov::Node>& op, const GraphContext::CPtr& cont
     // CompressedConstant is a Constant subclass (different type_info, same parent in RTTI
     // chain). Test it via ov::is_type to allow the subclass to flow through here.
     const bool is_compressed_constant = ov::is_type<ov::op::util::CompressedConstant>(op);
+    // Phase C: PinnedCompressedConstant is the wrapper op (inherits Op, not Constant).
+    const bool is_pinned_cc = ov::is_type<ov::intel_cpu::PinnedCompressedConstant>(op);
 
-    if (!is_compressed_constant &&
+    if (!is_compressed_constant && !is_pinned_cc &&
         none_of(op->get_type_info(),
                 op::v0::Parameter::get_type_info_static(),
                 op::v0::Constant::get_type_info_static(),
@@ -414,7 +417,14 @@ Input::Input(const std::shared_ptr<ov::Node>& op, const GraphContext::CPtr& cont
                                        " with name ",
                                        op->get_friendly_name());
     }
-    if (is_compressed_constant) {
+    if (is_pinned_cc) {
+        // Phase C: unwrap the PinnedCompressedConstant to get the underlying CC.
+        auto pinned = ov::as_type_ptr<ov::intel_cpu::PinnedCompressedConstant>(op);
+        m_compressedConstOp = pinned->get_compressed_constant();
+        m_constOp = m_compressedConstOp;
+        constant = ConstantType::Const;
+        cloneCompressedBlob();
+    } else if (is_compressed_constant) {
         // Take the CompressedConstant route: store the raw compressed blob as u8 [N_bytes]
         // and skip the f32-element subnormal/bf16 scans that the generic path would do.
         m_compressedConstOp = ov::as_type_ptr<ov::op::util::CompressedConstant>(op);
@@ -702,14 +712,21 @@ void Input::cloneCompressedBlob() {
                     m_compressedConstOp->get_friendly_name(),
                     "' has zero compressed bytes.");
 
-    // u8 [N_bytes] storage view, exactly matching the underlying blob.
-    CpuBlockedMemoryDesc storageDesc(ov::element::u8, Shape{compressed_bytes});
-
-    // Zero-copy: hand the Constant's blob pointer to a shared Memory wrapper. No
-    // subnormal / bf16 scans, no memcpy. The Constant owns the buffer for the model
-    // lifetime so this is safe.
-    memoryPtr =
-        std::make_shared<Memory>(getEngine(), storageDesc, m_compressedConstOp->get_compressed_data_ptr());
+    // Allocate a full-sized buffer matching the logical shape (f32 [N, K]).
+    // This ensures the memory descriptor matches what the graph edge expects
+    // (declared as f32 [N, K] from PinnedCC's logical output face).
+    // We copy the compressed blob into the first N_bytes of this buffer.
+    // The remaining bytes are unused padding — the CompressedConstantFCExecutor
+    // reads from attrs.compressedDataPtr (the original CC blob pointer) directly,
+    // completely bypassing this edge memory.
+    const auto& logicalShape = m_compressedConstOp->get_logical_shape();
+    const auto logicalType = m_compressedConstOp->get_logical_element_type();
+    CpuBlockedMemoryDesc logicalDesc(logicalType, Shape{logicalShape});
+    memoryPtr = std::make_shared<Memory>(getEngine(), logicalDesc);
+    // Copy compressed data into the buffer start (safe: compressed_bytes < logical size).
+    std::memcpy(memoryPtr->getData(),
+                m_compressedConstOp->get_compressed_data_ptr(),
+                compressed_bytes);
 }
 
 MemoryCPtr Input::getMemoryPtr() const {

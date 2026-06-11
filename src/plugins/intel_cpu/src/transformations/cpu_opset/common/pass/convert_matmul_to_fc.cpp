@@ -38,6 +38,7 @@
 #include "openvino/pass/pattern/op/wrap_type.hpp"
 #include "openvino/util/pp.hpp"
 #include "ov_ops/fully_connected.hpp"
+#include "transformations/cpu_opset/common/op/pinned_compressed_constant.hpp"
 #include "transformations/rt_info/decompression.hpp"
 #include "transformations/rt_info/disable_constant_folding.hpp"
 #include "transformations/rt_info/disable_fp16_compression.hpp"
@@ -48,7 +49,34 @@ ov::intel_cpu::ConvertMatMulToFC::ConvertMatMulToFC() {
     MATCHER_SCOPE(ConvertMatMulToFC);
     auto activations_m = ov::pass::pattern::any_input(ov::pass::pattern::has_static_rank());
     auto weights_path = [](const ov::Output<ov::Node>& output) {
-        return ov::op::util::is_on_path<ov::op::v0::Constant>(output);
+        // Accept standard Constant path OR PinnedCompressedConstant (Phase C wrapper
+        // for GGUF compressed weights). PinnedCC is a leaf node (0 inputs) that is NOT
+        // a v0::Constant subclass, so is_on_path<Constant> alone won't find it.
+        if (ov::op::util::is_on_path<ov::op::v0::Constant>(output)) {
+            return true;
+        }
+        // Walk backward to check for PinnedCompressedConstant leaf.
+        auto node = output.get_node();
+        std::deque<ov::Node*> queue = {node};
+        std::unordered_set<ov::Node*> visited;
+        while (!queue.empty()) {
+            auto* cur = queue.front();
+            queue.pop_front();
+            if (visited.count(cur)) continue;
+            visited.insert(cur);
+            if (cur->get_input_size() == 0) {
+                if (ov::is_type<ov::intel_cpu::PinnedCompressedConstant>(cur)) {
+                    return true;
+                }
+                return false;  // Unknown leaf type
+            }
+            for (const auto& iv : cur->input_values()) {
+                if (!visited.count(iv.get_node())) {
+                    queue.push_front(iv.get_node());
+                }
+            }
+        }
+        return false;
     };
     auto weights_m = ov::pass::pattern::any_input(weights_path);
     auto matmul_m = ov::pass::pattern::wrap_type<ov::op::v0::MatMul>({activations_m, weights_m},

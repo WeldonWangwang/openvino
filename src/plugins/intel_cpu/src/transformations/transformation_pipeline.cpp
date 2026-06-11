@@ -142,6 +142,7 @@
 #include "transformations/low_precision/mark_dequantization_subgraph.hpp"
 
 // CPU specific transformations
+#include "transformations/cpu_opset/common/pass/compressed_constant_pin.hpp"
 #include "transformations/cpu_opset/common/pass/insert_convert_after_extension.hpp"
 #include "transformations/cpu_opset/common/pass/ngram_fusion.hpp"
 #include "transformations/cpu_opset/common/pass/permute_slice_n_interpolation.hpp"
@@ -454,6 +455,18 @@ void Transformations::CpuSpecificOpSet() {
 
 void Transformations::PreLpt(const std::vector<ov::element::Type>& defaultPrecisions) {
     CPU_DEBUG_CAP_TRANSFORMATION_SCOPE(this, PreLpt);
+
+    // Phase C: Pin all CompressedConstant nodes before any other pass can pattern-match
+    // them via wrap_type<v0::Constant>() and call cast_vector/get_data_ptr (which would
+    // buffer-over-read the compressed blob). After pinning, the graph only contains
+    // PinnedCompressedConstant (inherits Op, not Constant) so all standard patterns skip it.
+    // At this stage PinnedCC reports the LOGICAL face (f32 [N, K]) so ConvertMatMulToFC
+    // and other shape-dependent passes work correctly.
+    {
+        ov::pass::Manager pin_manager("CPU:CompressedConstantPin");
+        pin_manager.register_pass<ov::intel_cpu::CompressedConstantPin>();
+        pin_manager.run_passes(model);
+    }
 
     // Decompression handling related transformations must be run separately from common preLPT pipeline
     // since there is used the same transformations as in LPT related transformations, but with the specific settings.

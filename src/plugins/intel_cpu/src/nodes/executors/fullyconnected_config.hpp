@@ -40,6 +40,12 @@ struct FCAttrs {
     ov::op::util::CompressedConstant::QuantType compressedQuantType =
         ov::op::util::CompressedConstant::QuantType::IQ3_XXS;
     ov::Shape compressedLogicalWeightShape;
+    // Direct pointer to the compressed blob. The executor reads from this
+    // pointer instead of from ARG_WEI memory, bypassing edge negotiation
+    // entirely. Lifetime is guaranteed: the CompressedConstant (held by
+    // PinnedCompressedConstant) owns the buffer for the model's lifetime.
+    const void* compressedDataPtr = nullptr;
+    size_t compressedByteSize = 0;
 
     ov::intel_cpu::Config::ModelType modelType = ov::intel_cpu::Config::ModelType::Unknown;
 

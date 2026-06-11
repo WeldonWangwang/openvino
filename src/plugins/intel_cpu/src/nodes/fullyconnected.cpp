@@ -44,6 +44,7 @@
 #include "openvino/op/convert.hpp"
 #include "openvino/op/reshape.hpp"
 #include "openvino/op/transpose.hpp"
+#include "transformations/cpu_opset/common/op/pinned_compressed_constant.hpp"
 #include "openvino/runtime/threading/cpu_message.hpp"
 #include "ov_ops/fully_connected.hpp"
 #include "ov_ops/fully_connected_compressed.hpp"
@@ -287,7 +288,8 @@ FullyConnected::FullyConnected(const std::shared_ptr<ov::Node>& op, const GraphC
     if (op->get_input_size() > WEIGHTS) {
         auto wsrc = op->input_value(WEIGHTS).get_node_shared_ptr();
         for (int unwrap = 0; unwrap < 4; ++unwrap) {
-            if (ov::is_type<ov::op::util::CompressedConstant>(wsrc)) {
+            if (ov::is_type<ov::op::util::CompressedConstant>(wsrc) ||
+                ov::is_type<ov::intel_cpu::PinnedCompressedConstant>(wsrc)) {
                 break;
             }
             if (ov::is_type<ov::op::v0::Convert>(wsrc) ||
@@ -298,10 +300,19 @@ FullyConnected::FullyConnected(const std::shared_ptr<ov::Node>& op, const GraphC
             }
             break;
         }
-        if (auto cc = ov::as_type_ptr<ov::op::util::CompressedConstant>(wsrc)) {
+        // Check for PinnedCompressedConstant first (Phase C wrapper).
+        if (auto pinned = ov::as_type_ptr<ov::intel_cpu::PinnedCompressedConstant>(wsrc)) {
+            attrs.isCompressedConstantWeight = true;
+            attrs.compressedQuantType = pinned->get_quant_type();
+            attrs.compressedLogicalWeightShape = pinned->get_logical_shape();
+            attrs.compressedDataPtr = pinned->get_compressed_data_ptr();
+            attrs.compressedByteSize = pinned->get_compressed_byte_size();
+        } else if (auto cc = ov::as_type_ptr<ov::op::util::CompressedConstant>(wsrc)) {
             attrs.isCompressedConstantWeight = true;
             attrs.compressedQuantType = cc->get_quant_type();
             attrs.compressedLogicalWeightShape = cc->get_logical_shape();
+            attrs.compressedDataPtr = cc->get_compressed_data_ptr();
+            attrs.compressedByteSize = cc->get_compressed_byte_size();
         }
     }
 }

@@ -1,0 +1,66 @@
+// Copyright (C) 2018-2026 Intel Corporation
+// SPDX-License-Identifier: Apache-2.0
+//
+
+#include "transformations/cpu_opset/common/pass/compressed_constant_pin.hpp"
+
+#include <cstdio>
+#include <memory>
+
+#include "openvino/core/graph_util.hpp"
+#include "openvino/core/node.hpp"
+#include "openvino/op/util/compressed_constant.hpp"
+#include "transformations/cpu_opset/common/op/pinned_compressed_constant.hpp"
+
+namespace ov::intel_cpu {
+
+bool CompressedConstantPin::run_on_model(const std::shared_ptr<ov::Model>& model) {
+    size_t n_pinned = 0;
+
+    // Iterate over a snapshot of the ordered ops (avoid invalidating iterators).
+    const auto ops = model->get_ordered_ops();
+    for (const auto& node : ops) {
+        auto cc = ov::as_type_ptr<ov::op::util::CompressedConstant>(node);
+        if (!cc) {
+            continue;
+        }
+
+        // Create the wrapper. It holds a shared_ptr to the CC (zero-copy blob).
+        auto pinned = std::make_shared<PinnedCompressedConstant>(cc);
+        pinned->set_friendly_name(cc->get_friendly_name() + "_pinned");
+
+        // Replace all downstream consumers: every output port of the CC that was
+        // connected to a consumer is now reconnected to the wrapper's output.
+        // The CC itself becomes dangling and will be cleaned up by the framework.
+        ov::replace_node(cc, pinned);
+
+        ++n_pinned;
+    }
+
+    if (n_pinned > 0) {
+        std::fprintf(stderr,
+                     "[intel_cpu] CompressedConstantPin: wrapped %zu CompressedConstant node(s)\n",
+                     n_pinned);
+    }
+
+    // Verify: no CompressedConstant nodes should remain in the graph.
+    // (They have all been replaced by PinnedCompressedConstant wrappers.)
+    if (n_pinned > 0) {
+        size_t n_cc_remaining = 0;
+        for (const auto& node : model->get_ordered_ops()) {
+            if (ov::is_type<ov::op::util::CompressedConstant>(node)) {
+                ++n_cc_remaining;
+            }
+        }
+        if (n_cc_remaining > 0) {
+            std::fprintf(stderr,
+                         "[intel_cpu] CompressedConstantPin WARNING: %zu CompressedConstant "
+                         "nodes survived (some earlier pass may have duplicated them)\n",
+                         n_cc_remaining);
+        }
+    }
+
+    return n_pinned > 0;
+}
+
+}  // namespace ov::intel_cpu

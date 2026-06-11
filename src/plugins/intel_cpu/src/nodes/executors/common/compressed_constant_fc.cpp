@@ -64,7 +64,6 @@ bool CompressedConstantFCExecutor::update([[maybe_unused]] const MemoryArgs& mem
 
 void CompressedConstantFCExecutor::execute(const MemoryArgs& memory) {
     const auto& srcMem = memory.at(ARG_SRC);
-    const auto& wMem = memory.at(ARG_WEI);
     const auto& dstMem = memory.at(ARG_DST);
 
     // Activation rank is variable (e.g. [B, S, K] or [M, K]); collapse all
@@ -93,10 +92,18 @@ void CompressedConstantFCExecutor::execute(const MemoryArgs& memory) {
                     " does not match weight N=",
                     m_N);
 
+    // Read the compressed blob directly from the stored pointer (set by FC
+    // ctor from the CompressedConstant/PinnedCompressedConstant). This
+    // bypasses edge memory entirely, avoiding the f32 [N,K] ↔ u8 [N_bytes]
+    // descriptor mismatch that would otherwise occur.
+    OPENVINO_ASSERT(m_attrs.compressedDataPtr,
+                    "CompressedConstantFCExecutor: compressedDataPtr is null");
+    const auto* w_data = static_cast<const uint8_t*>(m_attrs.compressedDataPtr);
+
     switch (m_attrs.compressedQuantType) {
     case QuantType::IQ3_XXS:
         kernels::iq3_xxs::iq3_xxs_fc(srcMem->getDataAs<float>(),
-                                     wMem->getDataAs<uint8_t>(),
+                                     w_data,
                                      dstMem->getDataAs<float>(),
                                      rows,
                                      m_K,
