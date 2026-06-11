@@ -50,10 +50,13 @@ bool CompressedConstantPin::run_on_model(const std::shared_ptr<ov::Model>& model
     }
 
     if (n_pinned > 0 || n_skipped > 0) {
+        static int call_count = 0;
+        ++call_count;
         std::fprintf(stderr,
-                     "[intel_cpu] CompressedConstantPin: wrapped %zu IQ3_XXS node(s), "
+                     "[intel_cpu] CompressedConstantPin[call#%d]: wrapped %zu IQ3_XXS node(s), "
                      "skipped %zu other-quant node(s)\n",
-                     n_pinned, n_skipped);
+                     call_count, n_pinned, n_skipped);
+        std::fflush(stderr);
     }
 
     // Verify: no IQ3_XXS CompressedConstant nodes should remain in the graph.

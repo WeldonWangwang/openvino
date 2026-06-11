@@ -359,6 +359,15 @@ std::shared_ptr<ov::ICompiledModel> Plugin::compile_model(const std::shared_ptr<
 
     const auto& config = orig_config;
     const std::shared_ptr<ov::Model> cloned_model = model->clone();
+    // DEBUG: count CCs in cloned model
+    {
+        size_t cc_in_clone = 0;
+        for (const auto& n : cloned_model->get_ordered_ops()) {
+            if (ov::is_type<ov::op::util::CompressedConstant>(n)) ++cc_in_clone;
+        }
+        std::fprintf(stderr, "[intel_cpu plugin] After clone: CC count in cloned_model = %zu\n", cc_in_clone);
+        std::fflush(stderr);
+    }
     Config::ModelType modelType = getModelType(model);
     DEBUG_LOG(PrintableModel(*cloned_model, "org_"));
 
