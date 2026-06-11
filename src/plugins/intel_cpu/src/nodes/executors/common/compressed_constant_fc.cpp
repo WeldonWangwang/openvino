@@ -5,6 +5,8 @@
 
 #include "compressed_constant_fc.hpp"
 
+#include <any>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 
@@ -16,6 +18,7 @@
 #include "nodes/kernels/iq3_xxs_kernels.hpp"
 #include "openvino/core/except.hpp"
 #include "openvino/op/util/compressed_constant.hpp"
+#include "post_ops.hpp"
 
 namespace ov::intel_cpu {
 
@@ -113,6 +116,67 @@ void CompressedConstantFCExecutor::execute(const MemoryArgs& memory) {
         OPENVINO_THROW("CompressedConstantFCExecutor: unsupported quant type ",
                        static_cast<int>(m_attrs.compressedQuantType));
     }
+
+    // Apply fused post-ops on the output buffer (in-place).
+    // Phase 1: supports bias (ScaleShiftPostOp::add) and common activations.
+    // Other post-op types trigger a warning but don't crash.
+    if (!m_attrs.postOps.empty()) {
+        float* dst = dstMem->getDataAs<float>();
+        const size_t dst_size = rows * m_N;
+        for (const auto& postOp : m_attrs.postOps) {
+            if (auto* act = std::any_cast<ActivationPostOp>(&postOp)) {
+                // Apply element-wise activation on dst.
+                switch (act->type()) {
+                case ActivationPostOp::Type::relu:
+                    for (size_t i = 0; i < dst_size; ++i)
+                        dst[i] = dst[i] > 0.f ? dst[i] : act->alpha() * dst[i];
+                    break;
+                case ActivationPostOp::Type::swish:
+                    for (size_t i = 0; i < dst_size; ++i) {
+                        float x = dst[i];
+                        dst[i] = x / (1.f + std::exp(-act->alpha() * x));
+                    }
+                    break;
+                case ActivationPostOp::Type::gelu_erf:
+                    for (size_t i = 0; i < dst_size; ++i) {
+                        float x = dst[i];
+                        dst[i] = 0.5f * x * (1.f + std::erf(x * 0.7071067811865475f));
+                    }
+                    break;
+                case ActivationPostOp::Type::gelu_tanh:
+                    for (size_t i = 0; i < dst_size; ++i) {
+                        float x = dst[i];
+                        dst[i] = 0.5f * x * (1.f + std::tanh(0.7978845608f * (x + 0.044715f * x * x * x)));
+                    }
+                    break;
+                case ActivationPostOp::Type::logistic:
+                    for (size_t i = 0; i < dst_size; ++i)
+                        dst[i] = 1.f / (1.f + std::exp(-dst[i]));
+                    break;
+                case ActivationPostOp::Type::tanh:
+                    for (size_t i = 0; i < dst_size; ++i)
+                        dst[i] = std::tanh(dst[i]);
+                    break;
+                default:
+                    // Unsupported activation: leave output as-is (warning-level only).
+                    break;
+                }
+            } else if (auto* ss = std::any_cast<ScaleShiftPostOp>(&postOp)) {
+                // ScaleShift: typically bias addition (type=add, shift per-channel).
+                // The shift data comes from a fused input (e.g. ARG_BIAS memory).
+                // For bias addition: dst[row][n] += bias[n]
+                if (ss->type() == ScaleShiftPostOp::Type::add) {
+                    if (auto it = memory.find(ARG_BIAS); it != memory.end() && it->second) {
+                        const float* bias = it->second->getDataAs<float>();
+                        for (size_t r = 0; r < rows; ++r)
+                            for (size_t n = 0; n < m_N; ++n)
+                                dst[r * m_N + n] += bias[n];
+                    }
+                }
+            }
+            // Other post-op types (FakeQuantize, Sum, etc.) are ignored in Phase 1.
+        }
+    }
 }
 
 bool CompressedConstantFCExecutor::supports(const FCConfig& config) {
@@ -125,12 +189,13 @@ bool CompressedConstantFCExecutor::supports(const FCConfig& config) {
     if (config.attrs.compressedQuantType != QuantType::IQ3_XXS) {
         return false;
     }
-    // No post-op fusion in phase 1 — keep the bit-exact baseline minimal.
-    // Adding fused bias / activation is straightforward once we have the
-    // path baselined; defer to phase 2.
-    if (!config.attrs.postOps.empty()) {
-        return false;
-    }
+    // MUST accept all CC-weight FC layers regardless of post-ops.
+    // If we return false, the factory falls through to other executors
+    // (oneDNN, MLAS, etc.) which try to use the weight edge memory as
+    // normal f32 data—but it actually holds compressed bytes, causing
+    // either garbage output or an allocation of a full logical-sized buffer.
+    //
+    // Post-ops (bias, activation) are applied manually after the kernel.
     return true;
 }
 

@@ -712,21 +712,25 @@ void Input::cloneCompressedBlob() {
                     m_compressedConstOp->get_friendly_name(),
                     "' has zero compressed bytes.");
 
-    // Allocate a full-sized buffer matching the logical shape (f32 [N, K]).
-    // This ensures the memory descriptor matches what the graph edge expects
-    // (declared as f32 [N, K] from PinnedCC's logical output face).
-    // We copy the compressed blob into the first N_bytes of this buffer.
-    // The remaining bytes are unused padding — the CompressedConstantFCExecutor
-    // reads from attrs.compressedDataPtr (the original CC blob pointer) directly,
-    // completely bypassing this edge memory.
+    // Zero-copy with logical-face descriptor.
+    //
+    // Strategy: create a Memory that wraps the CC's compressed blob pointer
+    // but declares itself with the LOGICAL descriptor (f32 [N, K]). This means:
+    //   - The descriptor claims N*K*4 bytes of accessible storage
+    //   - The actual buffer is only compressed_bytes in size
+    //
+    // This is safe because the ONLY consumer of this weight edge is the
+    // CompressedConstantFCExecutor, which reads from attrs.compressedDataPtr
+    // (with correct bounds knowledge) and NEVER accesses the edge memory.
+    // The logical descriptor is needed to keep the graph edge system happy
+    // (Input output desc must match the FC weight input desc = f32 [N, K]).
+    //
+    // No new memory is allocated. The CC owns the buffer for the model lifetime.
     const auto& logicalShape = m_compressedConstOp->get_logical_shape();
     const auto logicalType = m_compressedConstOp->get_logical_element_type();
     CpuBlockedMemoryDesc logicalDesc(logicalType, Shape{logicalShape});
-    memoryPtr = std::make_shared<Memory>(getEngine(), logicalDesc);
-    // Copy compressed data into the buffer start (safe: compressed_bytes < logical size).
-    std::memcpy(memoryPtr->getData(),
-                m_compressedConstOp->get_compressed_data_ptr(),
-                compressed_bytes);
+    memoryPtr = std::make_shared<Memory>(getEngine(), logicalDesc,
+                                        m_compressedConstOp->get_compressed_data_ptr());
 }
 
 MemoryCPtr Input::getMemoryPtr() const {

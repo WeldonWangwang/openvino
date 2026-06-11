@@ -21,10 +21,15 @@ PinnedCompressedConstant::PinnedCompressedConstant(
 PinnedCompressedConstant::~PinnedCompressedConstant() = default;
 
 void PinnedCompressedConstant::validate_and_infer_types() {
-    // Always report the logical face so that shape inference works correctly
-    // both during transforms AND when the CPU graph builder reads port shapes.
+    // Always report the logical face (f32 [N, K]) so that:
+    //   1. Shape inference during transforms works correctly
+    //   2. FC's port negotiation sees the expected 2-D weight shape
+    //   3. Edge descriptors are consistent throughout the pipeline
+    //
     // The actual compressed blob is accessed by the executor via
     // attrs.compressedDataPtr, completely bypassing edge memory.
+    // Input::cloneCompressedBlob() creates a zero-copy Memory wrapper
+    // that points to the compressed buffer with a logical-face descriptor.
     if (m_wrapped_cc) {
         set_output_type(0,
                         m_wrapped_cc->get_logical_element_type(),

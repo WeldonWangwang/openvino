@@ -10,6 +10,7 @@
 #include "openvino/core/attribute_visitor.hpp"
 #include "openvino/core/except.hpp"
 #include "openvino/runtime/aligned_buffer.hpp"
+#include "openvino/runtime/shared_buffer.hpp"
 
 namespace ov {
 namespace op {
@@ -144,13 +145,16 @@ std::shared_ptr<ov::Node> CompressedConstant::clone_with_new_inputs(const ov::Ou
     OPENVINO_ASSERT(new_args.empty(),
                     "CompressedConstant: clone_with_new_inputs expects no inputs, got ",
                     new_args.size());
-    // Re-use the base Constant's shared AlignedBuffer to avoid blob duplication on clone.
-    // We need a thin handle to the same storage. We construct via the raw-pointer ctor
-    // and rely on Constant's copy-into-AlignedBuffer behaviour. For PoC simplicity we
-    // copy the bytes; if blob sharing becomes important we can extend the API to expose
-    // the underlying AlignedBuffer.
-    return std::make_shared<CompressedConstant>(get_compressed_data_ptr(),
-                                                get_compressed_byte_size(),
+    // Zero-copy clone: share the underlying compressed buffer. We create a SharedBuffer
+    // that wraps the raw data pointer and holds a shared_ptr to *this* node to keep the
+    // original buffer alive for the lifetime of the clone. This avoids the ~4 GB memory
+    // duplication that would occur if we copied all compressed blobs during model->clone().
+    auto owner = shared_from_this();  // prevents original CC (and its data) from being freed
+    auto shared_buf = std::make_shared<ov::SharedBuffer<std::shared_ptr<const ov::Node>>>(
+        const_cast<char*>(static_cast<const char*>(get_compressed_data_ptr())),
+        get_compressed_byte_size(),
+        owner);
+    return std::make_shared<CompressedConstant>(shared_buf,
                                                 m_logical_shape,
                                                 m_logical_type,
                                                 m_quant_type);

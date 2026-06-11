@@ -16,12 +16,24 @@ namespace ov::intel_cpu {
 
 bool CompressedConstantPin::run_on_model(const std::shared_ptr<ov::Model>& model) {
     size_t n_pinned = 0;
+    size_t n_skipped = 0;
 
     // Iterate over a snapshot of the ordered ops (avoid invalidating iterators).
     const auto ops = model->get_ordered_ops();
     for (const auto& node : ops) {
         auto cc = ov::as_type_ptr<ov::op::util::CompressedConstant>(node);
         if (!cc) {
+            continue;
+        }
+
+        // Only wrap CC nodes whose quant type we can handle end-to-end.
+        // Currently only IQ3_XXS is wired through CompressedConstantFCExecutor.
+        // Other quant types (IQ2_S, IQ4_XS, Q3_K, etc.) must be left as raw
+        // CompressedConstants — the standard graph pipeline will decompress them
+        // via the generic Constant path or they'll be handled by other passes.
+        using QT = ov::op::util::CompressedConstant::QuantType;
+        if (cc->get_quant_type() != QT::IQ3_XXS) {
+            ++n_skipped;
             continue;
         }
 
@@ -37,18 +49,21 @@ bool CompressedConstantPin::run_on_model(const std::shared_ptr<ov::Model>& model
         ++n_pinned;
     }
 
-    if (n_pinned > 0) {
+    if (n_pinned > 0 || n_skipped > 0) {
         std::fprintf(stderr,
-                     "[intel_cpu] CompressedConstantPin: wrapped %zu CompressedConstant node(s)\n",
-                     n_pinned);
+                     "[intel_cpu] CompressedConstantPin: wrapped %zu IQ3_XXS node(s), "
+                     "skipped %zu other-quant node(s)\n",
+                     n_pinned, n_skipped);
     }
 
-    // Verify: no CompressedConstant nodes should remain in the graph.
-    // (They have all been replaced by PinnedCompressedConstant wrappers.)
+    // Verify: no IQ3_XXS CompressedConstant nodes should remain in the graph.
+    // Other quant types are intentionally left as raw CC for standard handling.
     if (n_pinned > 0) {
         size_t n_cc_remaining = 0;
         for (const auto& node : model->get_ordered_ops()) {
-            if (ov::is_type<ov::op::util::CompressedConstant>(node)) {
+            auto cc_check = ov::as_type_ptr<ov::op::util::CompressedConstant>(node);
+            if (cc_check && cc_check->get_quant_type() ==
+                    ov::op::util::CompressedConstant::QuantType::IQ3_XXS) {
                 ++n_cc_remaining;
             }
         }
