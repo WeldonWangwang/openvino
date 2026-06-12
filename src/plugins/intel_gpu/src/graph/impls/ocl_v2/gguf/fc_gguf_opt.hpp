@@ -39,12 +39,13 @@ struct FCGGUFOpt : public ImplementationManager {
         : ImplementationManager(impl_types::ocl, shape_type, std::move(vf)) {}
 
     // GGUF formats with a working native kernel in this release (SPEC.md §4.1).
-    static constexpr std::array<element::Type_t, 5> kSupportedBaseline = {
+    static constexpr std::array<element::Type_t, 6> kSupportedBaseline = {
         element::Type_t::gguf_q4_0,
         element::Type_t::gguf_q4_k,
         element::Type_t::gguf_q5_k,
         element::Type_t::gguf_q6_k,
         element::Type_t::gguf_q8_0,
+        element::Type_t::gguf_iq3_xxs,
     };
 
     static bool is_supported_baseline(element::Type_t t) {

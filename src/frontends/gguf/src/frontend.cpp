@@ -95,8 +95,10 @@ void populate_rt_info(const std::shared_ptr<ov::Model>& model, const GGUFReader&
         set(reader.raw(file_keys::tokenizer_token_type), {"tokenizer", "ggml", "token_type"});
     if (reader.has(file_keys::tokenizer_merges))
         set(reader.raw(file_keys::tokenizer_merges), {"tokenizer", "ggml", "merges"});
-    set(static_cast<uint32_t>(reader.get_u64(file_keys::tokenizer_bos_id)), {"tokenizer", "ggml", "bos_token_id"});
-    set(static_cast<uint32_t>(reader.get_u64(file_keys::tokenizer_eos_id)), {"tokenizer", "ggml", "eos_token_id"});
+    if (reader.has(file_keys::tokenizer_bos_id))
+        set(static_cast<uint32_t>(reader.get_u64(file_keys::tokenizer_bos_id)), {"tokenizer", "ggml", "bos_token_id"});
+    if (reader.has(file_keys::tokenizer_eos_id))
+        set(static_cast<uint32_t>(reader.get_u64(file_keys::tokenizer_eos_id)), {"tokenizer", "ggml", "eos_token_id"});
     if (reader.has(file_keys::tokenizer_chat_template))
         set(reader.get_str(file_keys::tokenizer_chat_template), {"tokenizer", "chat_template"});
 

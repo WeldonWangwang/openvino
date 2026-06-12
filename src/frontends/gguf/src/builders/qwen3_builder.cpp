@@ -72,10 +72,32 @@ std::shared_ptr<ov::Node> empty_input() {
     return std::make_shared<v0::Constant>(ov::element::dynamic, ov::Shape{0});
 }
 
+bool is_gpu_supported_fc_type(const ov::element::Type& type) {
+    return type == ov::element::f32 || type == ov::element::f16 || type == ov::element::bf16 ||
+           type == ov::element::gguf_q4_0 || type == ov::element::gguf_q4_k || type == ov::element::gguf_q5_k ||
+           type == ov::element::gguf_q6_k || type == ov::element::gguf_q8_0 || type == ov::element::gguf_iq3_xxs;
+}
+
 // Build X * W^T keeping W compressed (raw gguf_* / f16 Constant) via FullyConnectedCompressed.
 // Optional bias is fed through the op's bias input when present (qwen3 has none).
 Output<Node> make_fc(const Output<Node>& input, const GGUFReader& reader, const std::string& base_name) {
-    auto weight = reader.tensor_constant(base_name + ".weight");
+    const std::string weight_name = base_name + ".weight";
+    const GGUFTensorInfo* weight_info = reader.find_tensor(weight_name);
+    OPENVINO_ASSERT(weight_info, "[GGUF Frontend] Missing FC weight tensor '", weight_name, "'.");
+
+    if (!is_gpu_supported_fc_type(weight_info->type)) {
+        auto weight_f16 = dequantize_to_f16(reader, weight_name);
+        auto weight = std::make_shared<v0::Convert>(weight_f16, ov::element::f32);
+        std::shared_ptr<ov::Node> out = std::make_shared<v0::MatMul>(input, weight, false, true);
+        if (reader.has_tensor(base_name + ".bias")) {
+            auto bias = reader.tensor_constant(base_name + ".bias");
+            auto bias_f32 = std::make_shared<v0::Convert>(bias, ov::element::f32);
+            out = std::make_shared<v1::Add>(out, bias_f32, ov::op::AutoBroadcastType::NUMPY);
+        }
+        return out;
+    }
+
+    auto weight = reader.tensor_constant(weight_name);
     std::shared_ptr<ov::Node> bias = empty_input();
     if (reader.has_tensor(base_name + ".bias")) {
         bias = reader.tensor_constant(base_name + ".bias");

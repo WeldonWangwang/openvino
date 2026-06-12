@@ -2,13 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-// Embedding-only dequantization.
+// Load-time GGUF dequantization for graph paths that cannot consume raw block weights.
 //
-// Per the GGUF frontend contract, FullyConnected weights are kept compressed (raw gguf_* Constants
-// consumed by FullyConnectedCompressed). The token embedding is a Gather (row lookup), not a GEMM,
-// and there is no gguf-aware Gather kernel; therefore the single tensor backing the embedding is
-// materialized to a dense f16 Constant here, at load time. No gguf type ever reaches the graph for
-// this path, so the no-in-graph-dequantization invariant is preserved.
+// GGUF FullyConnected weights stay compressed when the target device reports native support for the
+// corresponding block type. Unsupported GGUF tensors, and embedding tensors used by Gather, are
+// materialized to dense f16 Constants here at load time.
 
 #pragma once
 
@@ -24,8 +22,8 @@ namespace gguf {
 
 /// \brief Dequantize the named GGUF tensor to a dense f16 Constant.
 ///
-/// Trivial pass-through for F32/F16/BF16; full block decode for Q8_0/Q4_0/Q4_1/Q4_K/Q5_K/Q6_K
-/// (canonical ggml layouts). Throws for unsupported quantization types.
+/// Trivial pass-through for F32/F16/BF16; full block decode for supported GGUF layouts. Throws for
+/// unsupported quantization types.
 std::shared_ptr<ov::op::v0::Constant> dequantize_to_f16(const GGUFReader& reader, const std::string& name);
 
 }  // namespace gguf

@@ -43,6 +43,8 @@ const char* gguf_type_jit_flag(element::Type_t t) {
         return "GGUF_IS_Q5_K";
     case element::Type_t::gguf_q6_k:
         return "GGUF_IS_Q6_K";
+    case element::Type_t::gguf_iq3_xxs:
+        return "GGUF_IS_IQ3_XXS";
     default:
         OPENVINO_THROW("[GPU] FCGGUFOpt: no kernel for GGUF element type ", element::Type(t).get_type_name());
     }
@@ -418,7 +420,9 @@ public:
     FCGGUFOptImpl(const program_node& node, const RuntimeParams& params) : FCGGUFOptImpl() {
         add_stage(gguf_stage, params);
 #ifdef ENABLE_ONEDNN_FOR_GPU
-        add_stage(transcode_stage, params);
+        if (params.input_layouts[1].data_type != element::Type_t::gguf_iq3_xxs) {
+            add_stage(transcode_stage, params);
+        }
         if (m_use_q5k_dp4a && params.input_layouts[1].data_type == element::Type_t::gguf_q5_k) {
             m_q5k_dp4a = true;
             add_stage(prequant_stage, params);
@@ -506,7 +510,8 @@ public:
         const auto& in1 = params.get_input_layout(1);
         if (!in0.is_dynamic() && !in1.is_dynamic()) {
             const size_t M = derive_bm(in0.get_shape());
-            if (M > m_prefill_threshold) {
+            const bool force_gemv = in1.data_type == element::Type_t::gguf_iq3_xxs;
+            if (!force_gemv && M > m_prefill_threshold) {
                 return execute_transcode_plus_onednn_woq(events, instance, M);
             }
             if (m_q5k_dp4a || m_q6k_dp4a) {

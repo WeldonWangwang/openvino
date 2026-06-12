@@ -65,12 +65,14 @@ class ocl_kernel_builder : public kernel_builder{
                 DISCARD_RETURN(program.createKernels(&kernels));
             } catch (const cl::BuildError& err) {
                 GPU_DEBUG_INFO << "-------- Kernel build error" << std::endl;
+                std::stringstream build_log;
                 auto log = err.getBuildLog();
                 for (auto &e : log) {
                     GPU_DEBUG_INFO << e.second;
+                    build_log << e.second;
                 }
                 GPU_DEBUG_INFO << "-------- End of Kernel build error" << std::endl;
-                OPENVINO_THROW(OCL_ERR_MSG_FMT(err));
+                OPENVINO_THROW(OCL_ERR_MSG_FMT(err), "\n", build_log.str());
             } catch (const cl::Error& err) {
                 OPENVINO_THROW(OCL_ERR_MSG_FMT(err));
             } catch (...) {

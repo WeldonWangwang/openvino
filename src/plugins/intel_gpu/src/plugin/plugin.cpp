@@ -652,7 +652,7 @@ ov::Any Plugin::get_metric(const std::string& name, const ov::AnyMap& options) c
     } else if (name == ov::supported_gguf_types) {
         // GGUF block weight formats with a native FCGGUFOpt kernel in this release (SPEC.md §4.4).
         // Upper-case GGUF spec names so benchmark_app / GenAI can enumerate without hard-coding.
-        return decltype(ov::supported_gguf_types)::value_type{"Q4_0", "Q4_K", "Q5_K", "Q6_K", "Q8_0"};
+        return decltype(ov::supported_gguf_types)::value_type{"Q4_0", "Q4_K", "Q5_K", "Q6_K", "Q8_0", "IQ3_XXS"};
     } else if (name == ov::range_for_async_infer_requests) {
         std::tuple<unsigned int, unsigned int, unsigned int> range = std::make_tuple(1, 2, 1);
         return decltype(ov::range_for_async_infer_requests)::value_type {range};
