@@ -27,11 +27,26 @@
 // OpenCL program, and undecorated names would collide ("redefinition of ...").
 
 #include "include/batch_headers/common.cl"
+#include "include/batch_headers/fetch_data.cl"
 
 // Reconstruct a half from two little-endian bytes (GGUF is little-endian, as is every OV host/target).
 inline half FUNC(gguf_load_f16)(const __global uchar* p) {
     ushort bits = (ushort)p[0] | ((ushort)p[1] << 8);
     return as_half(bits);
+}
+
+inline float FUNC(gguf_load_activation)(OPTIONAL_SHAPE_INFO_ARG const __global INPUT0_TYPE* A,
+                                        const uint bm,
+                                        const uint k) {
+    const uint b = bm / INPUT0_FEATURE_NUM;
+    const uint f = bm - b * INPUT0_FEATURE_NUM;
+    return (float)A[INPUT0_GET_INDEX(b, f, k, 0)];
+}
+
+inline uint FUNC(gguf_output_index)(OPTIONAL_SHAPE_INFO_ARG const uint bm, const uint n) {
+    const uint b = bm / OUTPUT_FEATURE_NUM;
+    const uint f = bm - b * OUTPUT_FEATURE_NUM;
+    return OUTPUT_GET_INDEX(b, f, n, 0);
 }
 
 // ============================================================================
@@ -41,27 +56,33 @@ inline half FUNC(gguf_load_f16)(const __global uchar* p) {
 // ============================================================================
 
 #if defined(GGUF_IS_Q4_0)
-inline float FUNC(gguf_block_dot)(const __global uchar* blk, const __global INPUT0_TYPE* a) {
+inline float FUNC(gguf_block_dot)(OPTIONAL_SHAPE_INFO_ARG const __global uchar* blk,
+                                  const __global INPUT0_TYPE* A,
+                                  const uint bm,
+                                  const uint k0) {
     const float d = (float)FUNC_CALL(gguf_load_f16)(blk);
     const __global uchar* qs = blk + 2;
     float acc = 0.0f;
     for (int j = 0; j < 16; ++j) {
         const int lo = (int)(qs[j] & 0x0F) - 8;
         const int hi = (int)(qs[j] >> 4) - 8;
-        acc += (float)a[j]      * ((float)lo * d);
-        acc += (float)a[j + 16] * ((float)hi * d);
+        acc += FUNC_CALL(gguf_load_activation)(OPTIONAL_SHAPE_INFO_TENSOR A, bm, k0 + (uint)j) * ((float)lo * d);
+        acc += FUNC_CALL(gguf_load_activation)(OPTIONAL_SHAPE_INFO_TENSOR A, bm, k0 + (uint)j + 16) * ((float)hi * d);
     }
     return acc;
 }
 #endif
 
 #if defined(GGUF_IS_Q8_0)
-inline float FUNC(gguf_block_dot)(const __global uchar* blk, const __global INPUT0_TYPE* a) {
+inline float FUNC(gguf_block_dot)(OPTIONAL_SHAPE_INFO_ARG const __global uchar* blk,
+                                  const __global INPUT0_TYPE* A,
+                                  const uint bm,
+                                  const uint k0) {
     const float d = (float)FUNC_CALL(gguf_load_f16)(blk);
     const __global char* qs = (const __global char*)(blk + 2);
     float acc = 0.0f;
     for (int j = 0; j < 32; ++j) {
-        acc += (float)a[j] * ((float)qs[j] * d);
+        acc += FUNC_CALL(gguf_load_activation)(OPTIONAL_SHAPE_INFO_TENSOR A, bm, k0 + (uint)j) * ((float)qs[j] * d);
     }
     return acc;
 }
@@ -81,7 +102,10 @@ inline void FUNC(gguf_get_scale_min_k4)(int j, const __global uchar* q, uchar* d
 #endif
 
 #if defined(GGUF_IS_Q4_K)
-inline float FUNC(gguf_block_dot)(const __global uchar* blk, const __global INPUT0_TYPE* a) {
+inline float FUNC(gguf_block_dot)(OPTIONAL_SHAPE_INFO_ARG const __global uchar* blk,
+                                  const __global INPUT0_TYPE* A,
+                                  const uint bm,
+                                  const uint k0) {
     const float d    = (float)FUNC_CALL(gguf_load_f16)(blk);
     const float dmin = (float)FUNC_CALL(gguf_load_f16)(blk + 2);
     const __global uchar* scales = blk + 4;    // 12 bytes
@@ -100,12 +124,12 @@ inline float FUNC(gguf_block_dot)(const __global uchar* blk, const __global INPU
         // Factor the per-element (d*q - m) into d*sum(a*q) - m*sum(a): one fma + one add per element.
         float sq1 = 0.0f, sa1 = 0.0f, sq2 = 0.0f, sa2 = 0.0f;
         for (int l = 0; l < 32; ++l) {
-            const float av = (float)a[ai + l];
+            const float av = FUNC_CALL(gguf_load_activation)(OPTIONAL_SHAPE_INFO_TENSOR A, bm, k0 + (uint)(ai + l));
             sq1 += av * (float)(qs[l] & 0x0F);
             sa1 += av;
         }
         for (int l = 0; l < 32; ++l) {
-            const float av = (float)a[ai + 32 + l];
+            const float av = FUNC_CALL(gguf_load_activation)(OPTIONAL_SHAPE_INFO_TENSOR A, bm, k0 + (uint)(ai + 32 + l));
             sq2 += av * (float)(qs[l] >> 4);
             sa2 += av;
         }
@@ -119,7 +143,10 @@ inline float FUNC(gguf_block_dot)(const __global uchar* blk, const __global INPU
 #endif
 
 #if defined(GGUF_IS_Q5_K)
-inline float FUNC(gguf_block_dot)(const __global uchar* blk, const __global INPUT0_TYPE* a) {
+inline float FUNC(gguf_block_dot)(OPTIONAL_SHAPE_INFO_ARG const __global uchar* blk,
+                                  const __global INPUT0_TYPE* A,
+                                  const uint bm,
+                                  const uint k0) {
     const float d    = (float)FUNC_CALL(gguf_load_f16)(blk);
     const float dmin = (float)FUNC_CALL(gguf_load_f16)(blk + 2);
     const __global uchar* scales = blk + 4;    // 12 bytes
@@ -140,13 +167,13 @@ inline float FUNC(gguf_block_dot)(const __global uchar* blk, const __global INPU
         // Factor the per-element (d*q - m) into d*sum(a*q) - m*sum(a): one fma + one add per element.
         float sq1 = 0.0f, sa1 = 0.0f, sq2 = 0.0f, sa2 = 0.0f;
         for (int l = 0; l < 32; ++l) {
-            const float av = (float)a[ai + l];
+            const float av = FUNC_CALL(gguf_load_activation)(OPTIONAL_SHAPE_INFO_TENSOR A, bm, k0 + (uint)(ai + l));
             const int q = (int)(ql[l] & 0x0F) + ((qh[l] & u1) ? 16 : 0);
             sq1 += av * (float)q;
             sa1 += av;
         }
         for (int l = 0; l < 32; ++l) {
-            const float av = (float)a[ai + 32 + l];
+            const float av = FUNC_CALL(gguf_load_activation)(OPTIONAL_SHAPE_INFO_TENSOR A, bm, k0 + (uint)(ai + 32 + l));
             const int q = (int)(ql[l] >> 4) + ((qh[l] & u2) ? 16 : 0);
             sq2 += av * (float)q;
             sa2 += av;
@@ -163,7 +190,10 @@ inline float FUNC(gguf_block_dot)(const __global uchar* blk, const __global INPU
 #endif
 
 #if defined(GGUF_IS_Q6_K)
-inline float FUNC(gguf_block_dot)(const __global uchar* blk, const __global INPUT0_TYPE* a) {
+inline float FUNC(gguf_block_dot)(OPTIONAL_SHAPE_INFO_ARG const __global uchar* blk,
+                                  const __global INPUT0_TYPE* A,
+                                  const uint bm,
+                                  const uint k0) {
     const __global uchar* ql = blk;            // 128 bytes (low 4 bits)
     const __global uchar* qh = blk + 128;      // 64 bytes (high 2 bits)
     const __global char*  sc = (const __global char*)(blk + 192);  // 16 signed scales
@@ -183,10 +213,10 @@ inline float FUNC(gguf_block_dot)(const __global uchar* blk, const __global INPU
             const int q2 = (int)((ql[l + 32] & 0x0F) | (((qh[l] >> 2) & 3) << 4)) - 32;
             const int q3 = (int)((ql[l + 0]  >> 4)   | (((qh[l] >> 4) & 3) << 4)) - 32;
             const int q4 = (int)((ql[l + 32] >> 4)   | (((qh[l] >> 6) & 3) << 4)) - 32;
-            acc1 += (float)a[o + l + 0]  * (d * (float)sc[is + 0] * q1);
-            acc2 += (float)a[o + l + 32] * (d * (float)sc[is + 2] * q2);
-            acc3 += (float)a[o + l + 64] * (d * (float)sc[is + 4] * q3);
-            acc4 += (float)a[o + l + 96] * (d * (float)sc[is + 6] * q4);
+            acc1 += FUNC_CALL(gguf_load_activation)(OPTIONAL_SHAPE_INFO_TENSOR A, bm, k0 + (uint)(o + l + 0))  * (d * (float)sc[is + 0] * q1);
+            acc2 += FUNC_CALL(gguf_load_activation)(OPTIONAL_SHAPE_INFO_TENSOR A, bm, k0 + (uint)(o + l + 32)) * (d * (float)sc[is + 2] * q2);
+            acc3 += FUNC_CALL(gguf_load_activation)(OPTIONAL_SHAPE_INFO_TENSOR A, bm, k0 + (uint)(o + l + 64)) * (d * (float)sc[is + 4] * q3);
+            acc4 += FUNC_CALL(gguf_load_activation)(OPTIONAL_SHAPE_INFO_TENSOR A, bm, k0 + (uint)(o + l + 96)) * (d * (float)sc[is + 6] * q4);
         }
         o  += 128;
         ql += 64;
@@ -244,7 +274,10 @@ CONST_ARRAY_DECL(ksigns_iq2xs) = {
     240, 113, 114, 243, 116, 245, 246, 119, 120, 249, 250, 123, 252, 125, 126, 255,
 };
 
-inline float FUNC(gguf_block_dot)(const __global uchar* blk, const __global INPUT0_TYPE* a) {
+inline float FUNC(gguf_block_dot)(OPTIONAL_SHAPE_INFO_ARG const __global uchar* blk,
+                                  const __global INPUT0_TYPE* A,
+                                  const uint bm,
+                                  const uint k0) {
     const float d = (float)FUNC_CALL(gguf_load_f16)(blk);
     const __global uchar* qs = blk + 2;
     const __global uchar* scales_signs = blk + 2 + 64;
@@ -266,14 +299,14 @@ inline float FUNC(gguf_block_dot)(const __global uchar* blk, const __global INPU
             const uchar g2b1 = (uchar)((g2 >> 8) & 0xFFu);
             const uchar g2b2 = (uchar)((g2 >> 16) & 0xFFu);
             const uchar g2b3 = (uchar)((g2 >> 24) & 0xFFu);
-            acc += (float)a[ai + 0] * (db * (float)g1b0 * ((signs & 1u) ? -1.0f : 1.0f));
-            acc += (float)a[ai + 1] * (db * (float)g1b1 * ((signs & 2u) ? -1.0f : 1.0f));
-            acc += (float)a[ai + 2] * (db * (float)g1b2 * ((signs & 4u) ? -1.0f : 1.0f));
-            acc += (float)a[ai + 3] * (db * (float)g1b3 * ((signs & 8u) ? -1.0f : 1.0f));
-            acc += (float)a[ai + 4] * (db * (float)g2b0 * ((signs & 16u) ? -1.0f : 1.0f));
-            acc += (float)a[ai + 5] * (db * (float)g2b1 * ((signs & 32u) ? -1.0f : 1.0f));
-            acc += (float)a[ai + 6] * (db * (float)g2b2 * ((signs & 64u) ? -1.0f : 1.0f));
-            acc += (float)a[ai + 7] * (db * (float)g2b3 * ((signs & 128u) ? -1.0f : 1.0f));
+            acc += FUNC_CALL(gguf_load_activation)(OPTIONAL_SHAPE_INFO_TENSOR A, bm, k0 + (uint)(ai + 0)) * (db * (float)g1b0 * ((signs & 1u) ? -1.0f : 1.0f));
+            acc += FUNC_CALL(gguf_load_activation)(OPTIONAL_SHAPE_INFO_TENSOR A, bm, k0 + (uint)(ai + 1)) * (db * (float)g1b1 * ((signs & 2u) ? -1.0f : 1.0f));
+            acc += FUNC_CALL(gguf_load_activation)(OPTIONAL_SHAPE_INFO_TENSOR A, bm, k0 + (uint)(ai + 2)) * (db * (float)g1b2 * ((signs & 4u) ? -1.0f : 1.0f));
+            acc += FUNC_CALL(gguf_load_activation)(OPTIONAL_SHAPE_INFO_TENSOR A, bm, k0 + (uint)(ai + 3)) * (db * (float)g1b3 * ((signs & 8u) ? -1.0f : 1.0f));
+            acc += FUNC_CALL(gguf_load_activation)(OPTIONAL_SHAPE_INFO_TENSOR A, bm, k0 + (uint)(ai + 4)) * (db * (float)g2b0 * ((signs & 16u) ? -1.0f : 1.0f));
+            acc += FUNC_CALL(gguf_load_activation)(OPTIONAL_SHAPE_INFO_TENSOR A, bm, k0 + (uint)(ai + 5)) * (db * (float)g2b1 * ((signs & 32u) ? -1.0f : 1.0f));
+            acc += FUNC_CALL(gguf_load_activation)(OPTIONAL_SHAPE_INFO_TENSOR A, bm, k0 + (uint)(ai + 6)) * (db * (float)g2b2 * ((signs & 64u) ? -1.0f : 1.0f));
+            acc += FUNC_CALL(gguf_load_activation)(OPTIONAL_SHAPE_INFO_TENSOR A, bm, k0 + (uint)(ai + 7)) * (db * (float)g2b3 * ((signs & 128u) ? -1.0f : 1.0f));
             ai += 8;
         }
         qs += 8;
@@ -309,16 +342,18 @@ KERNEL(fc_gguf_opt)(
 
     const int blocks_per_row = K_SIZE / GGUF_BLOCK_ELEM;
     const __global uchar* w_row = W + (uint)n * (uint)blocks_per_row * GGUF_BLOCK_BYTES;
-    const __global INPUT0_TYPE* a_row = A + (uint)bm * (uint)K_SIZE;
 
     // Stripe row `n`'s blocks across the subgroup lanes; each lane streams its blocks' dot product.
     float partial = 0.0f;
     for (int kb = lane; kb < blocks_per_row; kb += SG_SIZE) {
-        partial += FUNC_CALL(gguf_block_dot)(w_row + (uint)kb * GGUF_BLOCK_BYTES,
-                                             a_row + (uint)kb * GGUF_BLOCK_ELEM);
+        partial += FUNC_CALL(gguf_block_dot)(OPTIONAL_SHAPE_INFO_TENSOR
+                             w_row + (uint)kb * GGUF_BLOCK_BYTES,
+                             A,
+                             (uint)bm,
+                             (uint)kb * GGUF_BLOCK_ELEM);
     }
 
     const float total = sub_group_reduce_add(partial);
     if (lane == 0)
-        C[(uint)bm * (uint)N_SIZE + n] = TO_OUTPUT_TYPE(total);
+        C[FUNC_CALL(gguf_output_index)(OPTIONAL_SHAPE_INFO_TENSOR (uint)bm, (uint)n)] = TO_OUTPUT_TYPE(total);
 }

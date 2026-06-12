@@ -171,6 +171,7 @@ protected:
 
     [[nodiscard]] JitConstants get_jit_constants(const RuntimeParams& params) const override {
         auto jit = make_base_jit_constants(params);
+        jit.add(make_tensors_jit_constants(params));
 
         const auto& in0 = params.input_layouts[0];  // activation [BM, K]
         const auto& in1 = params.input_layouts[1];  // gguf weight [N, K] (always static)
@@ -208,12 +209,9 @@ protected:
 
     [[nodiscard]] DispatchDataFunc get_dispatch_data_func() const override {
         return DispatchDataFunc{[](const RuntimeParams& params, KernelData& kd, ImplRuntimeParams*) {
-            if (params.is_dynamic()) {
-                return;
-            }
-            const auto& in1 = params.input_layouts[1];
+            const auto& in1 = params.get_input_layout(1);
             const size_t N = in1.get_shape()[0];
-            const size_t BM = derive_bm(params.input_layouts[0].get_shape());
+            const size_t BM = derive_bm(params.get_input_layout(0).get_shape());
 
             // K-split: one subgroup (GGUF_GEMV_SG_SIZE lanes) per output. global[0] = N * SG_SIZE,
             // local[0] = SG_SIZE keeps exactly one subgroup per work-group (max work-groups -> best
@@ -221,6 +219,7 @@ protected:
             auto& wgs = kd.params.workGroups;
             wgs.global = {N * GGUF_GEMV_SG_SIZE, BM, 1};
             wgs.local = {GGUF_GEMV_SG_SIZE, 1, 1};
+
         }};
     }
 };
@@ -504,6 +503,15 @@ public:
         // and re-runs decode (M=1) with the prefill row count, writing past the M=1 output buffer
         // (CL_OUT_OF_RESOURCES / out-of-bounds).
         update_rt_params(instance);
+        // Dynamic decode may execute consecutive tokens with the same concrete shape while the memory
+        // objects backing the activation/output change. Rebind arguments every time so the GEMV stage
+        // does not read the previous token's activation when no SHAPE_CHANGED flag is raised.
+        gguf_stage->kd.need_args_update = true;
+        // The GEMV stage dispatch depends on the concrete runtime activation/output shape. Consecutive
+        // decode iterations often have the same rank but different runtime buffers and may not carry a
+        // SHAPE_CHANGED flag all the way to this custom multi-stage execute() path, so refresh dispatch
+        // unconditionally before enqueueing the shape-agnostic kernel.
+        gguf_stage->kd.need_dispatch_data_update = true;
 #ifdef ENABLE_ONEDNN_FOR_GPU
         const auto& params = *instance.get_impl_params();
         const auto& in0 = params.get_input_layout(0);

@@ -58,7 +58,7 @@ struct data_type_traits {
 
     static bool is_i4_u4(data_types data_type) {
         auto et = ov::element::Type(data_type);
-        return et.bitwidth() == 4;
+        return !et.is_gguf_block() && et.bitwidth() == 4;
     }
 
     static ov::element::Type max_type(ov::element::Type t1, ov::element::Type t2) {
