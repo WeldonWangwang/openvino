@@ -62,7 +62,8 @@ size_t derive_bm(const ov::Shape& shape_a) {
 // --------------------------------------------------------------------------------------------------
 // GGUF -> OneDNN-WOQ transcode mapping (compute-bound path, SUMMARY §3.3.2 / SPEC §4.3).
 // Each baseline GGUF format is requantised (symmetric, per REQUANT_GROUP) into the smallest OneDNN
-// low-bit weight domain that preserves its precision tier: 4-bit families -> i4, 5/6/8-bit -> i8.
+// low-bit weight domain that preserves its precision tier: 4-bit families -> i4, 5/6/8-bit and IQ
+// codebook families -> i8.
 // REQUANT_GROUP is fixed at 32 (divides every baseline block_elem: 32 and 256).
 // --------------------------------------------------------------------------------------------------
 constexpr int GGUF_REQUANT_GROUP = 32;
@@ -80,6 +81,7 @@ GgufTranscodeTarget transcode_target(element::Type_t t) {
     case element::Type_t::gguf_q5_k:
     case element::Type_t::gguf_q6_k:
     case element::Type_t::gguf_q8_0:
+    case element::Type_t::gguf_iq3_xxs:
         return {false, 127};
     default:
         OPENVINO_THROW("[GPU] FCGGUFOpt: no transcode target for ", element::Type(t).get_type_name());
@@ -419,9 +421,7 @@ public:
     FCGGUFOptImpl(const program_node& node, const RuntimeParams& params) : FCGGUFOptImpl() {
         add_stage(gguf_stage, params);
 #ifdef ENABLE_ONEDNN_FOR_GPU
-        if (params.input_layouts[1].data_type != element::Type_t::gguf_iq3_xxs) {
-            add_stage(transcode_stage, params);
-        }
+        add_stage(transcode_stage, params);
         if (m_use_q5k_dp4a && params.input_layouts[1].data_type == element::Type_t::gguf_q5_k) {
             m_q5k_dp4a = true;
             add_stage(prequant_stage, params);
@@ -518,8 +518,7 @@ public:
         const auto& in1 = params.get_input_layout(1);
         if (!in0.is_dynamic() && !in1.is_dynamic()) {
             const size_t M = derive_bm(in0.get_shape());
-            const bool force_gemv = in1.data_type == element::Type_t::gguf_iq3_xxs;
-            if (!force_gemv && M > m_prefill_threshold) {
+            if (M > m_prefill_threshold) {
                 return execute_transcode_plus_onednn_woq(events, instance, M);
             }
             if (m_q5k_dp4a || m_q6k_dp4a) {
