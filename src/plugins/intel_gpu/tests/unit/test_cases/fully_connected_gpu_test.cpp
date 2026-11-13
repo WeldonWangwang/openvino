@@ -120,6 +120,7 @@ struct gguf_fc_mode {
     gguf_bias_mode bias_mode = gguf_bias_mode::none;
     size_t rank4_batch = 0;
     bool low_bit_prefill = false;
+    bool export_import = false;
 };
 
 class gguf_fc_dynamic_reference : public ::testing::TestWithParam<gguf_fc_mode> {};
@@ -865,10 +866,18 @@ TEST_P(gguf_fc_dynamic_reference, matches_reference) {
     auto compiled = core.compile_model(public_graph, "GPU", ov::hint::inference_precision(precision),
                                        ov::enable_profiling(true), ov::num_streams(1));
     auto request = compiled.create_infer_request();
+    std::optional<ov::InferRequest> imported_request;
+    if (GetParam().export_import) {
+        std::stringstream binary;
+        compiled.export_model(binary);
+        auto imported = core.import_model(binary, "GPU", ov::hint::inference_precision(precision),
+                                           ov::enable_profiling(true), ov::num_streams(1));
+        imported_request = imported.create_infer_request();
+    }
     for (const auto& operation : compiled.get_runtime_model()->get_ordered_ops())
         EXPECT_EQ(operation->get_rt_info().count("gguf_last_executed_kernels"), 0u);
-    const bool gemm_capable = gguf_gemm_capable(engine, shuffled, channels);
-    const bool cm_selected = GetParam().cm && GetParam().use_cm && gemm_capable;
+    const bool gemm_capable = gguf_gemm_capable(engine, columns % 256 == 0, channels);
+    const bool cm_selected = GetParam().cm && GetParam().use_cm && shuffled && gemm_capable;
     // Without a usable CM kernel (or without a request for it) a capable node uses the OCL GEMM.
     const bool ocl_selected = gemm_capable && !cm_selected;
     auto weights = engine.allocate_memory({ov::PartialShape(weight_shape), weight_type, format::bfyx});
@@ -1013,6 +1022,13 @@ TEST_P(gguf_fc_dynamic_reference, matches_reference) {
         }
         auto public_output = request.get_output_tensor();
         ASSERT_EQ(public_output.get_shape(), public_expected_output);
+        if (imported_request) {
+            imported_request->set_input_tensor(public_input);
+            imported_request->infer();
+            const auto imported_output = imported_request->get_output_tensor();
+            ASSERT_EQ(imported_output.get_shape(), public_expected_output);
+            EXPECT_EQ(std::memcmp(public_output.data(), imported_output.data(), public_output.get_byte_size()), 0);
+        }
         RecordProperty("public_rows_iteration_" + std::to_string(iteration), std::to_string(rows));
         network.set_input_data("input", input);
         auto outputs = network.execute();
@@ -1056,7 +1072,7 @@ TEST_P(gguf_fc_dynamic_reference, matches_reference) {
         const std::string expected_stage = broadcast_peer ? sg_stage
                   : prefill && cm_for_iteration ? cm_stage
                           : prefill && ocl_for_iteration ? gguf_ocl_gemm_stage(weight_type)
-                          : prefill ? "fc_gguf_transcode_" + weight_type.to_string()
+                          : prefill && (GetParam().shuffle || GetParam().cm) ? "fc_gguf_transcode_" + weight_type.to_string()
                           : shuffled ? sg_stage : "fc_gguf_opt_" + weight_type.to_string();
         EXPECT_NE(entries.find(expected_stage), std::string::npos) << "iteration=" << iteration << " entries=" << entries;
         if (!has_bias && GetParam().post_activation != activation_func::negative && GetParam().use_cm)
@@ -1336,8 +1352,9 @@ TEST_P(gguf_qkv_dynamic_reference, matches_unfused_and_reference) {
             RecordProperty(std::string(shared ? "fused_stage_" : "unfused_stage_") + std::to_string(iteration), stages);
             if (shared) {
                 const std::string expected = rows > 32 ? mode.cm ? "gemm_q41_full"
-                                                               : gguf_gemm_capable(engine, mode.shuffle, 128) ? "fc_gguf_gemm_q4_1"
-                                                                                                              : "fc_gguf_transcode_gguf_q4_1"
+                                                               : gguf_gemm_capable(engine, true, 128) ? "fc_gguf_gemm_q4_1"
+                                                                                 : mode.shuffle ? "fc_gguf_transcode_gguf_q4_1"
+                                                                                                : "fc_gguf_opt_gguf_q4_1"
                                                        : mode.shuffle ? "fc_gguf_q4_1_sg" : "fc_gguf_opt_gguf_q4_1";
                 EXPECT_NE(stages.find(expected), std::string::npos) << stages;
             }
@@ -1385,6 +1402,27 @@ INSTANTIATE_TEST_SUITE_P(gguf,
                                           gguf_qkv_mode{"cm_bias_f32_rank3", true, true, ov::element::f32, true, true},
                                           gguf_qkv_mode{"cm_bias_f16_rank2", true, true, ov::element::f16, false, true}),
                         [](const ::testing::TestParamInfo<gguf_qkv_mode>& info) { return info.param.name; });
+
+INSTANTIATE_TEST_SUITE_P(gguf_raw_ocl_prefill,
+                        gguf_fc_dynamic_reference,
+                        ::testing::ValuesIn([] {
+                            std::vector<gguf_fc_mode> modes;
+                            for (const auto& type : {ov::element::gguf_q4_0, ov::element::gguf_q4_1, ov::element::gguf_q8_0,
+                                                    ov::element::gguf_q4_k, ov::element::gguf_q5_k, ov::element::gguf_q6_k}) {
+                                for (const auto& precision : {ov::element::f16, ov::element::f32}) {
+                                    gguf_fc_mode mode{type.to_string() + "_" + precision.to_string(), false, nullptr};
+                                    mode.channels = 64;
+                                    mode.columns = 768;
+                                    mode.weight_type = type;
+                                    mode.precision = precision;
+                                    mode.rank3 = true;
+                                    mode.export_import = true;
+                                    modes.push_back(mode);
+                                }
+                            }
+                            return modes;
+                        }()),
+                        [](const ::testing::TestParamInfo<gguf_fc_mode>& info) { return info.param.name; });
 
 INSTANTIATE_TEST_SUITE_P(gguf_nondefault_prefill,
                         gguf_fc_dynamic_reference,
@@ -1713,13 +1751,13 @@ TEST(fully_connected_gpu, gguf_gemm_perf_compare) {
         GTEST_SKIP() << "Device does not support the GGUF prefill GEMM";
     const std::array<gguf_perf_config, 3> configs = {{{"ocl", "ocl", "1", "fc_gguf_gemm_"},
                                                        {"cm", "cm", "1", "_full"},
-                                                       {"onednn", "ocl", "0", "fc_gguf_transcode_"}}};
+                                                       {"raw_ocl", "ocl", "0", "fc_gguf_gemm_"}}};
     const size_t channels = 4096;
     const size_t columns = 4096;
     std::cout << "GGUF prefill GEMM performance, f16 activations, K=" << columns << " N=" << channels
               << ", device-resident I/O. *_k = GPU kernel time (profiling), *_w = infer() wall time; us / TFLOPS.\n"
-              << "ocl_vs_cm = cm_k / ocl_k (>1: OCL faster). onednn_w covers transcode + oneDNN.\n";
-    std::cout << "type      M      ocl_k    ocl_TF  cm_k     cm_TF   ocl_vs_cm  ocl_w    cm_w     onednn_w\n";
+              << "ocl_vs_cm = cm_k / ocl_k (>1: OCL faster). raw_ocl_w uses original GGUF blocks.\n";
+    std::cout << "type      M      ocl_k    ocl_TF  cm_k     cm_TF   ocl_vs_cm  ocl_w    cm_w     raw_ocl_w\n";
     for (const auto& type : {ov::element::gguf_q4_0, ov::element::gguf_q4_1, ov::element::gguf_q4_k,
                              ov::element::gguf_q5_k, ov::element::gguf_q6_k, ov::element::gguf_q8_0}) {
         for (const size_t rows : {size_t{1024}, size_t{2048}, size_t{4096}, size_t{8192}, size_t{16384}}) {

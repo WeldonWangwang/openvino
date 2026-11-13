@@ -889,6 +889,10 @@ protected:
             make_jit_constant("GG_N_BAND", cfg.n_band),
             make_jit_constant("GG_A_F32", in0.data_type == data_types::f32 ? 1 : 0),
             make_jit_constant("GG_OUT_F32", out0.data_type == data_types::f32 ? 1 : 0),
+            make_jit_constant("GG_SHUFFLED", gguf_shuffle_applicable(params.input_layouts[1].data_type,
+                                                                      params.input_layouts[1].get_shape()[0],
+                                                                      params.input_layouts[1].get_shape()[1]) ? 1 : 0),
+            make_jit_constant("GG_K", params.input_layouts[1].get_shape()[1]),
             make_jit_constant(m_format_define, 1),
         });
         if (params.has_fused_primitives()) {
@@ -1070,7 +1074,8 @@ PrefillKernel gguf_select_prefill_kernel(const program_node& node, const Runtime
     const PrefillKernel preferred = gguf_prefill_gemm_requested();
     const std::string node_name = params.desc ? params.desc->id : std::string("<unknown>");
 
-    const std::string ocl_block = gguf_ocl_gemm_blocker(params, shuffled_family);
+    const bool ocl_layout_supported = family && params.input_layouts[1].get_shape()[1] % 256 == 0;
+    const std::string ocl_block = gguf_ocl_gemm_blocker(params, ocl_layout_supported);
     const std::string cm_block = preferred == PrefillKernel::cm ? gguf_cm_gemm_blocker(node, params, shuffled_family) : std::string("not requested");
 
     const std::string& preferred_block = preferred == PrefillKernel::cm ? cm_block : ocl_block;
@@ -1084,6 +1089,9 @@ PrefillKernel gguf_select_prefill_kernel(const program_node& node, const Runtime
     if (preferred == PrefillKernel::cm && ocl_block.empty()) {
         OPENVINO_WARN("[GPU] FCGGUFOpt: node '", node_name, "' cannot use prefill GEMM kernel 'cm' (", cm_block, "); using 'ocl'.");
         return PrefillKernel::ocl;
+    }
+    if (preferred == PrefillKernel::ocl && family && !gguf_shuffle_enabled()) {
+        return PrefillKernel::none;
     }
     if (family) {
         OPENVINO_WARN("[GPU] FCGGUFOpt: node '", node_name, "' prefill falls back to transcode + oneDNN (", preferred_name, " GEMM: ", preferred_block, ").");

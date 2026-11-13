@@ -14,7 +14,117 @@
 #include "include/batch_headers/sub_group_block_write.cl"
 #include "fc_gguf_gemm_common.cl"
 
+#if !GG_SHUFFLED
+
+#define GG_RAW_T uint16
+
+inline uchar FUNC(gg_native_quant)(const __global uchar* block, uint index) {
 #if GG_FMT_Q4_0
+    return (block[2 + index % 16] >> (index / 16 * 4)) & 15;
+#elif GG_FMT_Q4_1
+    return (block[4 + index % 16] >> (index / 16 * 4)) & 15;
+#elif GG_FMT_Q8_0
+    return block[2 + index];
+#elif GG_FMT_Q4_K || GG_FMT_Q5_K
+#if GG_FMT_Q5_K
+    const uint quant_offset = 48;
+#else
+    const uint quant_offset = 16;
+#endif
+    const uint group = index / 32;
+    uint quant = (block[quant_offset + group / 2 * 32 + index % 32] >> (group % 2 * 4)) & 15;
+#if GG_FMT_Q5_K
+    quant |= ((block[16 + index % 32] >> group) & 1) << 4;
+#endif
+    return (uchar)quant;
+#elif GG_FMT_Q6_K
+    const uint half_block = index / 128;
+    const uint group = index % 128 / 32;
+    const uint low = (block[half_block * 64 + group % 2 * 32 + index % 32] >> (group / 2 * 4)) & 15;
+    const uint high = (block[128 + half_block * 32 + index % 32] >> (group * 2)) & 3;
+    return (uchar)(low | (high << 4));
+#endif
+}
+
+inline uint16 FUNC(gg_fetch)(const __global uchar* W, uint num_blocks, uint blk, uint j) {
+    const uint blocks_per_row = GG_K / 256;
+    const uint row = blk / blocks_per_row * 16 + get_sub_group_local_id();
+    const uint column_block = blk % blocks_per_row;
+#if GG_FMT_Q4_0 || GG_FMT_Q4_1 || GG_FMT_Q8_0
+#if GG_FMT_Q4_0
+    const uint block_bytes = 18;
+#elif GG_FMT_Q4_1
+    const uint block_bytes = 20;
+#else
+    const uint block_bytes = 34;
+#endif
+    const __global uchar* block = W + ((ulong)row * (GG_K / 32) + column_block * 8 + j) * block_bytes;
+    const uint start = 0;
+#else
+#if GG_FMT_Q4_K
+    const uint block_bytes = 144;
+#elif GG_FMT_Q5_K
+    const uint block_bytes = 176;
+#else
+    const uint block_bytes = 210;
+#endif
+    const __global uchar* block = W + ((ulong)row * blocks_per_row + column_block) * block_bytes;
+    const uint start = j * 32;
+#endif
+    float scale_low = convert_float(vload_half(0, (const __global half*)block));
+    float scale_high = scale_low;
+    float offset_low = 0.0f;
+    float offset_high = 0.0f;
+#if GG_FMT_Q4_0
+    offset_low = offset_high = -8.0f * scale_low;
+#elif GG_FMT_Q4_1
+    offset_low = offset_high = convert_float(vload_half(0, (const __global half*)(block + 2)));
+#elif GG_FMT_Q4_K || GG_FMT_Q5_K
+    const __global uchar* scales = block + 4;
+    const uint scale = j < 4 ? scales[j] & 63 : (scales[j + 4] & 15) | ((scales[j - 4] >> 6) << 4);
+    const uint minimum = j < 4 ? scales[j + 4] & 63 : (scales[j + 4] >> 4) | ((scales[j] >> 6) << 4);
+    scale_low = scale_high = (float)scale * scale_low;
+    offset_low = offset_high = -(float)minimum * convert_float(vload_half(0, (const __global half*)(block + 2)));
+#elif GG_FMT_Q6_K
+    const float delta = convert_float(vload_half(0, (const __global half*)(block + 208)));
+    scale_low = delta * (float)(char)block[192 + j * 2];
+    scale_high = delta * (float)(char)block[193 + j * 2];
+    offset_low = -32.0f * scale_low;
+    offset_high = -32.0f * scale_high;
+#endif
+    uint8 low;
+    uint8 high;
+    __attribute__((opencl_unroll_hint))
+    for (uint chunk = 0; chunk < 4; ++chunk) {
+        uint quant_low = 0;
+        uint quant_high = 0;
+        __attribute__((opencl_unroll_hint))
+        for (uint byte_index = 0; byte_index < 4; ++byte_index) {
+            const uint index = start + chunk * 4 + byte_index;
+            quant_low |= (uint)FUNC_CALL(gg_native_quant)(block, index) << (byte_index * 8);
+            quant_high |= (uint)FUNC_CALL(gg_native_quant)(block, index + 16) << (byte_index * 8);
+        }
+#if GG_FMT_Q8_0
+        const uint2 decoded_low = FUNC_CALL(gg_cvt4s)(quant_low, scale_low);
+        const uint2 decoded_high = FUNC_CALL(gg_cvt4s)(quant_high, scale_high);
+#else
+        const uint2 decoded_low = FUNC_CALL(gg_cvt4u)(quant_low, scale_low, offset_low);
+        const uint2 decoded_high = FUNC_CALL(gg_cvt4u)(quant_high, scale_high, offset_high);
+#endif
+        low[chunk * 2] = decoded_low.s0;
+        low[chunk * 2 + 1] = decoded_low.s1;
+        high[chunk * 2] = decoded_high.s0;
+        high[chunk * 2 + 1] = decoded_high.s1;
+    }
+    return (uint16)(low, high);
+}
+
+inline void FUNC(gg_decode)(uint16 raw, uint j, uint8* low, uint8* high) {
+    *low = raw.s01234567;
+    *high = raw.s89abcdef;
+}
+
+#elif GG_FMT_Q4_0
 // GGUF Q4_0 prefill GEMM (port of cm/gguf/gemm_q40_full.cm). w = (q - 8) * d.
 // Weights (shuffle layout): pqs_T(128B/block) || pd_T(16B/block).
 
